@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="studio-token" content="__EDITOR_TOKEN__">
+<title>HOI4 Türkçe Mod Toolu</title>
+<link rel="stylesheet" href="/static/studio.css">
+<style>
+.wrap { padding: 18px 24px; overflow-y: auto; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; margin-top: 10px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; text-decoration: none; color: var(--text); display: block; }
+a.card:hover { border-color: var(--gold); }
+.card h2 { margin-top: 0; }
+.card.soon { opacity: .55; }
+.tag { font-size: 10.5px; color: var(--muted); border: 1px solid var(--line); border-radius: 8px; padding: 0 6px; }
+.steps li { margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<div class="toolbar"><b style="color:var(--gold)">Ana sayfa</b><span class="sep"></span><span class="small">patis_compilation agora addon için yerel mod editörü</span></div>
+<div class="wrap">
+	<div id="resume"></div>
+	<div class="cards">
+		<a class="card" href="/focus.html"><h2>Odak Ağaçları</h2><div>Odakları sürükle, ödüllerini, önkoşullarını ve ikonlarını düzenle; yeni odak ekle.</div></a>
+		<a class="card" href="/ideas.html"><h2>Milli Ruhlar</h2><div>Ruhların resmi, metni ve modifier tablosu; oyundaki ipucu kartı önizlemesi ve kullanıldığı yerler.</div></a>
+		<a class="card" href="/decisions.html"><h2>Kararlar</h2><div>Karar ve görevler kategorileriyle; maliyet, süre, koşullar, etkiler ve kategori tanımları.</div></a>
+		<a class="card" href="/events.html"><h2>Olaylar</h2><div>Başlık, metin, resim ve seçenekler; oyundaki pencere önizlemesi ve olay zinciri grafiği.</div></a>
+		<a class="card" href="/countries.html"><h2>Ülkeler</h2><div>Başkent, siyaset ve popülerlik, başlangıç ruhları ve teknolojileri, işe alınan karakterler, isimler, harita rengi, bayrak yükleme ve yeni ülke.</div></a>
+		<a class="card" href="/characters.html"><h2>Karakterler</h2><div>Liderler, danışmanlar ve komutanlar: portreler, roller, ideoloji ve özellikler; oyundaki kart önizlemesi.</div></a>
+		<a class="card" href="/health.html"><h2>Mod Sağlığı</h2><div>Kontrol aracını çalıştır; her bulgu tek tıkla ilgili editörde açılır.</div></a>
+	</div>
+	<div class="card" style="margin-top:18px"><h2>Claude ile çalışma</h2>
+		<ol class="steps">
+			<li>Herhangi bir editörde bir öğe seç (odak, ruh, karar, olay, ülke, karakter…).</li>
+			<li>Sağdaki <b>Claude'a gönder</b> kutusuna ne istediğini yaz ve gönder.</li>
+			<li>Sağ üstteki gösterge "Claude: dinliyor" değilse terminalde Claude'a <b>editörü dinle</b> yaz.</li>
+			<li>Claude işi bitirince sayfa kendiliğinden yenilenir; değişen öğeler mor ✦ ile işaretlenir. Geçmiş için göstergeye tıkla.</li>
+		</ol>
+		<div class="small" style="margin-bottom:6px">Her sayfanın sağ üstündeki <b>? Yardım</b> düğmesi (ya da F1) o sayfanın nasıl kullanıldığını anlatır.</div>
+		<div class="small">Kayıtlar sadece değişen satırları yazar ve önce <code>.tmp/mod_studio/backups/</code> klasörüne yedek alır. Metinler yalnızca İngilizce dosyalara yazılır.</div>
+	</div>
+</div>
+<script src="/static/studio.js"></script>
+<script>
+"use strict";
+Studio.initNav("home");
+/* "continue where you left off": the file or country each editor had open last (kept by the pages) */
+(() => {
+	const read = (key) => { try { return localStorage.getItem(key) || ""; } catch (e) { return ""; } };
+	const base = (file) => file.split("/").pop();
+	const links = [];
+	const add = (label, key, href) => { const v = read(key); if (v) links.push(`<a class="chip" href="${href(v)}"><b>${label}</b> ${Studio.esc(key.endsWith(".tag") ? v : base(v))}</a>`); };
+	add("Odak ağacı", "studio.focus.file", (v) => "/focus.html?file=" + encodeURIComponent(v));
+	add("Ülke", "studio.country.tag", (v) => "/countries.html?tag=" + encodeURIComponent(v));
+	add("Karakterler", "studio.character.file", (v) => "/characters.html?file=" + encodeURIComponent(v));
+	add("Ruhlar", "studio.idea.file", (v) => "/ideas.html?file=" + encodeURIComponent(v));
+	add("Kararlar", "studio.decision.file", (v) => "/decisions.html?file=" + encodeURIComponent(v));
+	add("Olaylar", "studio.event.file", (v) => "/events.html?file=" + encodeURIComponent(v));
+	if (links.length) document.getElementById("resume").innerHTML = `<div class="card" style="margin-bottom:14px"><h2>Kaldığın yerden devam et</h2><div class="chips">${links.join("")}</div></div>`;
+})();
+</script>
+</body>
+</html>

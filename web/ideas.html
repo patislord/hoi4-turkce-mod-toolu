@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="studio-token" content="__EDITOR_TOKEN__">
+<title>Milli Ruhlar · HOI4 Türkçe Mod Toolu</title>
+<link rel="stylesheet" href="/static/studio.css">
+<style>
+.idea-card { display: flex; gap: 12px; max-width: 560px; }
+.idea-card img { width: 64px; height: 72px; object-fit: contain; flex: 0 0 64px; }
+.mods-preview { margin-top: 8px; line-height: 1.6; }
+</style>
+</head>
+<body>
+<div class="toolbar" id="toolbar"></div>
+<div class="page3"><div class="pane list" id="list"></div><div class="pane center" id="center"></div><div class="pane form" id="form"></div></div>
+<datalist id="modList"></datalist>
+<script src="/static/studio.js"></script>
+<script src="/static/studio-schema.js"></script>
+<script src="/static/studio-script.js"></script>
+<script>
+"use strict";
+Studio.initNav("ideas");
+const esc = Studio.esc;
+const labels = {};
+let refsCache = { id: null, html: "" };
+
+Studio.api("/api/idea/modifiers").then(({ names }) => {
+	document.getElementById("modList").innerHTML = names.map((n) => `<option value="${n}">`).join("");
+}).catch(() => {});
+
+function parseMods(body) {
+	const clean = body.split("\n").map((l) => l.split("#")[0]).join("\n");
+	if (/[{}]/.test(clean)) return { rows: [], complex: true };
+	const rows = [];
+	for (const m of clean.matchAll(/([A-Za-z0-9_]+)\s*=\s*([^\s{}#]+)/g)) rows.push({ key: m[1], value: m[2] });
+	const leftover = clean.replace(/([A-Za-z0-9_]+)\s*=\s*([^\s{}#]+)/g, "").trim();
+	return { rows, complex: leftover.length > 0 };
+}
+function fmtMod(key, value) {
+	const n = parseFloat(value);
+	if (isNaN(n)) return esc(value);
+	const pct = /factor/.test(key);
+	const shown = pct ? Math.round(n * 1000) / 10 + "%" : String(Math.round(n * 1000) / 1000);
+	return (n > 0 ? "+" : "") + shown;
+}
+async function ensureLabels(keys) {
+	const missing = keys.filter((k) => k && !(k in labels));
+	if (!missing.length) return;
+	try { const { labels: got } = await Studio.api("/api/idea/labels?keys=" + encodeURIComponent(missing.join(","))); Object.assign(labels, got); } catch (e) { /* labels are optional */ }
+}
+
+const page = new ItemPage({
+	kind: "idea",
+	label: "Milli Ruhlar",
+	group: (r) => r.category,
+	iconOf: (r) => r.sprite,
+	editor: {
+		scalars: {
+			picture: { label: "Resim", type: "sprite", prefix: "GFX_idea_", short: true, help: "boşsa GFX_idea_<id>", family: "idea_spirit", families: ["idea_spirit", "advisor_card"] },
+			removal_cost: { label: "Kaldırma maliyeti", type: "number", help: "-1 = kaldırılamaz" },
+			cost: { label: "Maliyet", type: "number", help: "yasa ve danışmanlarda" },
+			default: { label: "Varsayılan", type: "bool", help: "yasalarda başlangıç" },
+			cancel_if_invalid: { label: "Geçersizse iptal et", type: "bool" },
+		},
+		blocks: {
+			allowed: { label: "Kimler alabilir", help: "Oyun başında bir kez kontrol edilir (ör. original_tag = SYR).", script: "trigger" },
+			allowed_civil_war: { label: "İç savaşta kalsın mı", script: "trigger" },
+			visible: { label: "Görünürlük", script: "trigger" },
+			available: { label: "Seçilebilirlik", script: "trigger" },
+			cancel: { label: "İptal koşulu", help: "Doğru olduğunda ruh kendiliğinden kalkar.", script: "trigger" },
+			on_add: { label: "Eklenince", script: "effect" },
+			on_remove: { label: "Kaldırılınca", script: "effect" },
+			research_bonus: { label: "Araştırma bonusu", help: "0.1 = %10 daha hızlı araştırma", table: "tech_category", add: "Araştırma kategorisi ekle" },
+			equipment_bonus: { label: "Teçhizat bonusu" },
+			targeted_modifier: { label: "Hedefli modifier" },
+			rule: { label: "Kurallar" },
+			ai_will_do: { label: "Yapay zekâ ağırlığı", script: "ai" },
+		},
+		special: { modifier: true },
+		locFields: (ed) => [{ key: ed.model.id, label: "İsim" }, { key: ed.model.id + "_desc", label: "Açıklama", multiline: true }],
+		renderSpecial: (ed, el) => {
+			const entry = ed.get("modifier");
+			const body = entry ? entry.body : "";
+			const parsed = parseMods(body);
+			if (parsed.complex) {
+				el.innerHTML = `<h3>Modifier'lar</h3><div class="warn">Bu modifier bloğu iç içe yapı içeriyor; metin olarak düzenle.</div>
+					<textarea class="code" id="modRaw" rows="8" spellcheck="false">${esc(body)}</textarea>`;
+				const ta = el.querySelector("#modRaw"); Studio.codeArea(ta);
+				ta.addEventListener("input", () => { if (entry) { entry.body = ta.value; ed.changed(); } else ed.addBlock("modifier", ta.value); });
+				return;
+			}
+			const rows = parsed.rows;
+			el.innerHTML = `<h3>Modifier'lar</h3><div id="modTable"></div>`;
+			/* names are chosen from the game's modifier list; the table writes `name = value` lines back */
+			StudioScript.modTable(el.querySelector("#modTable"), { rows, of: "modifier", add: "Modifier ekle",
+				onChange: () => {
+					const text = rows.filter((r) => r.key && r.value !== "").map((r) => `${r.key} = ${r.value}`).join("\n");
+					const e = ed.get("modifier");
+					if (e) { e.body = text; ed.changed(); } else if (text) ed.addBlock("modifier", text);
+					ensureLabels(rows.map((r) => r.key)).then(() => page.changed());
+				} });
+		},
+	},
+	renderCenter: async (pg, el) => {
+		const ed = pg.editor, id = pg.id;
+		const pic = ed.scalar("picture");
+		const sprite = pic ? (pic.startsWith("GFX_") ? pic : "GFX_idea_" + pic) : "GFX_idea_" + id;
+		const mods = ed.get("modifier") ? parseMods(ed.get("modifier").body).rows : [];
+		for (const m of pg.item.modifiers || []) if (!(m.key in labels)) labels[m.key] = m.label;
+		await ensureLabels(mods.map((m) => m.key));
+		if (refsCache.id !== id) refsCache = { id, html: `<div class="small">Yükleniyor…</div>` };
+		el.innerHTML = `<h3>Oyundaki görünüm</h3>
+			<div class="hoi-card idea-card"><img src="${Studio.iconUrl(sprite)}" onerror="this.style.opacity=.15">
+				<div><div class="hoi-title">${Studio.locHtml(ed.loc[id] || id)}</div>
+				<div class="hoi-text" style="margin-top:4px">${Studio.locHtml(ed.loc[id + "_desc"] || "")}</div>
+				<div class="mods-preview">${mods.map((m) => `<div class="hoi-mod">${esc(labels[m.key] || m.key)}: <b>${fmtMod(m.key, m.value)}</b></div>`).join("") || `<span class="small">Modifier yok.</span>`}</div>
+				${ed.get("research_bonus") ? `<div class="small" style="margin-top:6px">Araştırma bonusu var.</div>` : ""}
+				${ed.get("equipment_bonus") ? `<div class="small">Teçhizat bonusu var.</div>` : ""}</div></div>
+			<div class="small" style="margin-top:6px">${esc(sprite)}</div>
+			<h3>Kullanıldığı yerler</h3><div id="refs">${refsCache.html}</div>`;
+		if (refsCache.html.includes("Yükleniyor")) {
+			const html = await pg.refsHtml(id);
+			refsCache = { id, html };
+			const box = document.getElementById("refs"); if (box && pg.id === id) box.innerHTML = html;
+		}
+	},
+	create: async (pg) => {
+		const cats = (pg.list && pg.list.categories) || [];
+		if (!cats.length) { Studio.toast("Bu dosyada ruh kategorisi (ör. country) yok.", true); return null; }
+		const prefix = ((pg.list.items[0] || {}).id || "").match(/^([A-Za-z0-9]+_)/);
+		const answer = await Studio.ask({ title: "Yeni milli ruh", intro: `Yazılacağı dosya: <code>${Studio.esc(pg.file)}</code>`, fields: [
+			{ key: "name", label: "İngilizce adı", placeholder: "ör. The Divided Land" },
+			{ key: "id", type: "id", from: "name", prefix: prefix ? prefix[1] : "", label: "Kimlik (id)", help: "isimden otomatik oluşur, istersen değiştir",
+				check: (v) => (pg.list.items.some((r) => r.id === v) ? "Bu dosyada bu kimlikle bir ruh zaten var." : "") },
+			...(cats.length > 1 ? [{ key: "category", type: "select", label: "Kategori", help: "milli ruhlar için country", value: cats.includes("country") ? "country" : cats[0], options: cats.map((c) => [c, c]) }] : []),
+		] });
+		if (!answer) return null;
+		return { id: answer.id, name: answer.name, meta: { category: answer.category || cats[0] } };
+	},
+});
+page.init();
+</script>
+</body>
+</html>

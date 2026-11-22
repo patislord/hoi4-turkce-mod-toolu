@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="studio-token" content="__EDITOR_TOKEN__">
+<title>Olaylar · HOI4 Türkçe Mod Toolu</title>
+<link rel="stylesheet" href="/static/studio.css">
+<style>
+.tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+.tabs button.active { border-color: var(--gold); background: #3a3426; }
+.ev-window { width: 470px; background: linear-gradient(#34373b, #2a2c30); border: 2px solid #6b6458; border-radius: 4px; box-shadow: 0 8px 24px rgba(0,0,0,.6); }
+.ev-window .bar { background: linear-gradient(#4a4130, #3a3326); color: #f3d58a; font-weight: 600; font-size: 15px; padding: 8px 12px; border-bottom: 1px solid #6b6458; }
+.ev-window .pic { padding: 10px 12px 0; display: flex; justify-content: center; }
+.ev-window .pic img { width: 210px; height: 176px; object-fit: cover; border: 1px solid #111; }
+.ev-window.news .pic img { width: 397px; height: 153px; filter: grayscale(1) contrast(1.1); }
+.ev-window.news { background: linear-gradient(#e9e2cf, #d9d0b8); color: #222; }
+.ev-window.news .bar { background: #222; color: #f2ecd9; font-family: Georgia, serif; font-size: 18px; text-align: center; }
+.ev-window.news .hoi-text { color: #222; font-family: Georgia, serif; }
+.ev-window .txt { padding: 10px 14px; max-height: 260px; overflow-y: auto; }
+.ev-window .opts { padding: 0 14px 12px; display: flex; flex-direction: column; gap: 6px; }
+.ev-window .opt { background: linear-gradient(#4b4f56, #3a3d43); border: 1px solid #77705f; border-radius: 3px; padding: 6px 10px; color: #f0e8d4; text-align: center; }
+.ev-window.news .opt { background: #2b2b2b; color: #f2ecd9; }
+.opt-card { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; margin-bottom: 8px; background: #262a31; }
+.opt-card.added { border-color: #5c8a52; } .opt-card.removed { opacity: .45; }
+svg.chain { background: #1f2227; border: 1px solid var(--line); border-radius: 6px; }
+svg.chain .node rect { fill: #2f333b; stroke: #6b6458; }
+svg.chain .node.cur rect { stroke: var(--sel); stroke-width: 3; }
+svg.chain .node.ext rect { fill: #262626; stroke-dasharray: 4 3; }
+svg.chain .node.hidden rect { fill: #2a2a35; }
+svg.chain .node text { fill: #eee; font-size: 11px; }
+svg.chain .node { cursor: pointer; }
+svg.chain path { fill: none; stroke: #9b937f; stroke-width: 1.6; }
+svg.chain path.hl { stroke: var(--sel); stroke-width: 2.4; }
+</style>
+</head>
+<body>
+<div class="toolbar" id="toolbar"></div>
+<div class="page3"><div class="pane list" id="list"></div><div class="pane center" id="center"></div><div class="pane form" id="form"></div></div>
+<script src="/static/studio.js"></script>
+<script src="/static/studio-schema.js"></script>
+<script src="/static/studio-script.js"></script>
+<script>
+"use strict";
+Studio.initNav("events");
+/* the scope an event's blocks run in, by its type */
+const EVENT_SCOPES = { country_event: "country", news_event: "country", state_event: "state", unit_leader_event: "character", operative_leader_event: "character" };
+const eventScope = (ed) => EVENT_SCOPES[ed.model.meta.type] ?? null;
+const esc = Studio.esc;
+let tab = "preview";
+let refsCache = { id: null, html: "" };
+let graphCache = { key: null, data: null };
+
+const nameKeyOf = (body) => { const m = (body || "").match(/(?:^|\s)name\s*=\s*"?([A-Za-z0-9_.\-]+)"?/); return m ? m[1] : null; };
+const textKeyOf = (body) => { const m = (body || "").match(/(?:^|\s)text\s*=\s*"?([A-Za-z0-9_.\-]+)"?/); return m ? m[1] : null; };
+const titleKey = (ed) => { const t = ed.get("title"); return t ? (t.type === "scalar" ? String(t.value).replace(/"/g, "") : textKeyOf(t.body)) : null; };
+
+function textBlock(ed, key, label, multiline) {
+	const entries = ed.all(key);
+	let html = "";
+	entries.forEach((e, i) => {
+		if (e.type === "scalar") {
+			const k = String(e.value).replace(/"/g, "");
+			html += `<div class="field"><label>${esc(label)}${entries.length > 1 ? " #" + (i + 1) : ""} <span class="small">(${esc(k)})</span></label>
+				${multiline ? `<textarea data-tl="${esc(k)}" rows="5">${esc(ed.loc[k] || "")}</textarea>` : `<input data-tl="${esc(k)}" value="${esc(ed.loc[k] || "")}">`}</div>`;
+		} else {
+			const k = textKeyOf(e.body);
+			html += `<div class="section"><div class="head"><b>Koşullu ${esc(label.toLowerCase())} #${i + 1}</b><span class="k">${esc(key)} = { ... }</span></div>
+				${k ? `<div class="field"><label>Metin <span class="small">(${esc(k)})</span></label>${multiline ? `<textarea data-tl="${esc(k)}" rows="4">${esc(ed.loc[k] || "")}</textarea>` : `<input data-tl="${esc(k)}" value="${esc(ed.loc[k] || "")}">`}</div>` : ""}
+				<textarea class="code" data-tb="${esc(key)}:${e.occ}" rows="4" spellcheck="false">${esc(e.body)}</textarea></div>`;
+		}
+	});
+	return html;
+}
+
+const page = new ItemPage({
+	kind: "event",
+	label: "Olaylar",
+	group: (r) => r.namespace,
+	iconOf: (r) => r.sprite,
+	subOf: (r) => [r.type === "news_event" ? "haber" : r.type.replace("_event", ""), r.hidden ? "gizli" : "", r.triggered ? "" : "MTTH"].filter(Boolean).join(" · "),
+	nameKey: (pg) => titleKey(pg.editor) || pg.id,
+	editor: {
+		scalars: {
+			picture: { label: "Resim", type: "sprite", prefix: "", pickPrefix: "GFX_", query: "report_event",
+				family: (ed) => (ed.model.meta.type === "news_event" ? "news_event" : "report_event"), families: ["report_event", "news_event"] },
+			is_triggered_only: { label: "Sadece tetiklenince", type: "bool", help: "is_triggered_only" },
+			fire_only_once: { label: "Yalnızca bir kez", type: "bool" },
+			hidden: { label: "Gizli olay", type: "bool", help: "oyuncuya pencere açılmaz" },
+			major: { label: "Herkese gösterilir (major)", type: "bool" },
+			fire_for_sender: { label: "Gönderene de gösterilir", type: "bool" },
+			timeout_days: { label: "Cevap süresi (gün)", type: "number" },
+		},
+		blocks: {
+			trigger: { label: "Tetiklenme koşulu (trigger)", script: "trigger", scope: eventScope },
+			mean_time_to_happen: { label: "Ortalama gerçekleşme süresi (MTTH)" },
+			immediate: { label: "Hemen (immediate)", help: "Olay açılır açılmaz çalışır.", script: "effect", scope: eventScope },
+			after: { label: "Seçenekten sonra (after)", script: "effect", scope: eventScope },
+			show_major: { label: "Kime büyük olay olarak gösterilir" },
+		},
+		special: { id: true, title: true, desc: true, option: true },
+		renderSpecial: (ed, el) => {
+			const options = ed.entries.filter((e) => e.key === "option");
+			el.innerHTML = `<h3>Başlık ve metin</h3>
+				${textBlock(ed, "title", "Başlık", false) || `<button class="small" id="addTitle">＋ Başlık ekle</button>`}
+				${textBlock(ed, "desc", "Açıklama", true) || `<button class="small" id="addDesc">＋ Açıklama ekle</button>`}
+				<h3>Seçenekler</h3>
+				${options.map((o, i) => {
+					const k = nameKeyOf(o.body);
+					return `<div class="opt-card ${o.removed ? "removed" : o.isNew ? "added" : ""}">
+						<div class="row"><b class="fixed" style="color:#e9dcc0">Seçenek ${i + 1}</b><span class="small">${esc(k || "isim anahtarı yok")}</span>
+						${o.removed ? `<button class="small fixed" data-ou="${i}">Geri al</button>` : `<button class="small fixed" data-od="${i}">Kaldır</button>`}</div>
+						${k ? `<div class="field" style="margin-top:4px"><input data-tl="${esc(k)}" value="${esc(ed.loc[k] || "")}" placeholder="Seçenek metni (İngilizce)" ${o.removed ? "disabled" : ""}></div>` : ""}
+						${o.removed ? `<textarea class="code" rows="3" disabled>${esc(o.body)}</textarea>` : `<div data-ob="${i}"></div>`}</div>`;
+				}).join("")}
+				<button class="small" id="addOpt">＋ Seçenek ekle</button>`;
+			el.querySelectorAll("[data-tl]").forEach((inp) => inp.addEventListener("input", () => { ed.loc[inp.dataset.tl] = inp.value; ed.changed(); }));
+			el.querySelectorAll("[data-tb]").forEach((ta) => { Studio.codeArea(ta); ta.addEventListener("input", () => { const [k, occ] = ta.dataset.tb.split(":"); ed.setBlock(k, ta.value, +occ); }); });
+			/* each option is drawn by the script builder: its effects, plus the option's own parts (trigger, ai_chance) */
+			el.querySelectorAll("[data-ob]").forEach((host) => {
+				const o = options[+host.dataset.ob];
+				const info = { script: "effect", scope: eventScope, extra: ScriptSchema.OPTION_PARTS };
+				StudioScript.builder(host, ed.builderOptions(info, o.body, (text) => {
+					const before = nameKeyOf(o.body);
+					o.body = text; ed.changed();
+					if (nameKeyOf(text) !== before) ed.render();  /* the text field follows the option's name key */
+				}, ed.raw !== null));
+			});
+			el.querySelectorAll("[data-od]").forEach((b) => (b.onclick = () => { ed.remove(options[+b.dataset.od]); ed.render(); }));
+			el.querySelectorAll("[data-ou]").forEach((b) => (b.onclick = () => { options[+b.dataset.ou].removed = false; ed.changed(); ed.render(); }));
+			const at = el.querySelector("#addTitle"); if (at) at.onclick = () => { const k = ed.model.id + ".t"; ed.setScalar("title", k); if (!(k in ed.loc)) ed.loc[k] = ""; ed.render(); };
+			const ad = el.querySelector("#addDesc"); if (ad) ad.onclick = () => { const k = ed.model.id + ".d"; ed.setScalar("desc", k); if (!(k in ed.loc)) ed.loc[k] = ""; ed.render(); };
+			el.querySelector("#addOpt").onclick = () => {
+				const used = new Set(options.map((o) => nameKeyOf(o.body)).filter(Boolean));
+				let letter = "a";
+				while (used.has(`${ed.model.id}.${letter}`) && letter < "z") letter = String.fromCharCode(letter.charCodeAt(0) + 1);
+				const k = `${ed.model.id}.${letter}`;
+				ed.addBlock("option", `name = ${k}`);
+				ed.loc[k] = ed.loc[k] || "";
+				ed.render();
+			};
+		},
+	},
+	toolbar: (pg, el) => { el.innerHTML = ""; },
+	renderCenter: async (pg, el) => {
+		el.innerHTML = `<div class="tabs"><button data-tab="preview" class="${tab === "preview" ? "active" : ""}">Önizleme</button>
+			<button data-tab="chain" class="${tab === "chain" ? "active" : ""}">Zincir</button><button data-tab="usage" class="${tab === "usage" ? "active" : ""}">Kullanım</button></div><div id="tabBody"></div>`;
+		el.querySelectorAll("[data-tab]").forEach((b) => (b.onclick = () => { tab = b.dataset.tab; pg.changed(true); }));
+		const body = document.getElementById("tabBody");
+		if (tab === "preview") drawPreview(pg, body);
+		else if (tab === "chain") await drawChain(pg, body);
+		else await drawUsage(pg, body);
+	},
+	create: async (pg) => {
+		const spaces = (pg.list && pg.list.namespaces) || [];
+		/* the next free number of the chosen namespace is suggested until the user types an id */
+		const nextId = async (ns) => { try { return (await Studio.api("/api/event/nextid?namespace=" + encodeURIComponent(ns))).id; } catch (e) { return ""; } };
+		let asked = spaces[0] || "";
+		const answer = await Studio.ask({ title: "Yeni olay", intro: `Yazılacağı dosya: <code>${Studio.esc(pg.file)}</code>`, fields: [
+			{ key: "type", type: "choice", label: "Tür", value: "country_event", options: [
+				["country_event", "Ülke olayı", "Resimli pencere; seçenekleri olan olağan olay."], ["news_event", "Haber olayı", "Gazete görünümlü, siyah-beyaz resimli dünya haberi."]] },
+			{ key: "name", label: "Başlık (İngilizce)", placeholder: "ör. The Great Syrian Revolt" },
+			spaces.length ? { key: "ns", type: "select", label: "Namespace", help: "olay ailesi; id bununla başlar", value: spaces[0], options: spaces.map((n) => [n, n]) }
+				: { key: "ns", label: "Namespace", help: "olay ailesi; id bununla başlar (ör. syria)", check: (v) => (/^[A-Za-z0-9_]+$/.test(v) ? "" : "Namespace yalnızca harf, rakam ve _ içerebilir.") },
+			{ key: "id", type: "id", label: "Kimlik (id)", help: "sıradaki boş numara önerilir", value: asked ? await nextId(asked) : "",
+				check: (v, all) => (pg.list.items.some((r) => r.id === v) ? "Bu dosyada bu kimlikle bir olay zaten var." : v.startsWith(all.ns + ".") ? "" : `Kimlik ${all.ns}. ile başlamalı (ör. ${all.ns}.1).`) },
+		], onChange: async (all, set) => {
+			const ns = String(all.ns || "").trim();
+			if (ns === asked || !/^[A-Za-z0-9_]+$/.test(ns)) return;
+			asked = ns;
+			const id = await nextId(ns);
+			if (id && asked === ns) set("id", id);
+		} });
+		if (!answer) return null;
+		return { id: answer.id, name: answer.name, meta: { type: answer.type } };
+	},
+});
+
+function drawPreview(pg, el) {
+	const ed = pg.editor, m = pg.item;
+	const news = m.meta.type === "news_event";
+	const pic = ed.scalar("picture");
+	const tk = titleKey(ed);
+	const descs = ed.all("desc").map((d) => d.type === "scalar" ? String(d.value).replace(/"/g, "") : textKeyOf(d.body)).filter(Boolean);
+	const options = ed.all("option").map((o) => nameKeyOf(o.body));
+	el.innerHTML = `${ed.scalar("hidden") === "yes" ? `<div class="warn">Gizli olay: oyunda pencere açılmaz, etkileri arka planda çalışır.</div>` : ""}
+		<div class="ev-window${news ? " news" : ""}">
+			<div class="bar">${Studio.locHtml(tk ? ed.loc[tk] || tk : "(başlık yok)")}</div>
+			${pic ? `<div class="pic"><img src="${Studio.iconUrl(pic)}" onerror="this.style.opacity=.15"></div>` : ""}
+			<div class="txt hoi-text">${descs.length ? Studio.locHtml(ed.loc[descs[0]] || descs[0]) : `<span class="small">(açıklama yok)</span>`}
+				${descs.length > 1 ? `<div class="small" style="margin-top:6px">+ ${descs.length - 1} koşullu açıklama daha</div>` : ""}</div>
+			<div class="opts">${options.map((k) => `<div class="opt">${Studio.locHtml(k ? ed.loc[k] || k : "(isimsiz seçenek)")}</div>`).join("")}</div>
+		</div>
+		<div class="small" style="margin-top:8px">${esc(m.meta.type)} · ${esc(pic || "resim yok")}</div>`;
+}
+
+async function drawChain(pg, el) {
+	const key = pg.file + "|" + pg.item.version;
+	if (graphCache.key !== key) {
+		el.innerHTML = `<div class="small">Zincir hesaplanıyor…</div>`;
+		graphCache = { key, data: await Studio.api("/api/event/graph?file=" + encodeURIComponent(pg.file)) };
+	}
+	const { nodes, edges } = graphCache.data;
+	if (!edges.length) { el.innerHTML = `<div class="small">Bu dosyadaki olaylar birbirini tetiklemiyor.</div>`; return; }
+	const incoming = new Map(nodes.map((n) => [n.id, 0]));
+	edges.forEach((e) => incoming.set(e.to, (incoming.get(e.to) || 0) + 1));
+	const level = new Map(nodes.map((n) => [n.id, 0]));
+	for (let pass = 0; pass < nodes.length; pass++) {
+		let moved = false;
+		for (const e of edges) {
+			const want = level.get(e.from) + 1;
+			if (want > level.get(e.to) && want < nodes.length) { level.set(e.to, want); moved = true; }
+		}
+		if (!moved) break;
+	}
+	const linked = new Set(edges.flatMap((e) => [e.from, e.to]));
+	const shown = nodes.filter((n) => linked.has(n.id));
+	const cols = new Map();
+	for (const n of shown) { const l = level.get(n.id); if (!cols.has(l)) cols.set(l, []); cols.get(l).push(n); }
+	const W = 200, H = 44, GX = 70, GY = 16;
+	const pos = new Map();
+	let maxRows = 0;
+	[...cols.keys()].sort((a, b) => a - b).forEach((l, ci) => { cols.get(l).forEach((n, ri) => pos.set(n.id, { x: 20 + ci * (W + GX), y: 20 + ri * (H + GY) })); maxRows = Math.max(maxRows, cols.get(l).length); });
+	const width = 40 + cols.size * (W + GX), height = 40 + maxRows * (H + GY);
+	const cur = pg.id;
+	let svg = `<svg class="chain" width="${width}" height="${height}"><defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9b937f"/></marker></defs>`;
+	for (const e of edges) {
+		const a = pos.get(e.from), b = pos.get(e.to); if (!a || !b) continue;
+		const x1 = a.x + W, y1 = a.y + H / 2, x2 = b.x, y2 = b.y + H / 2;
+		const back = x2 <= x1;
+		const d = back ? `M${a.x + W / 2},${a.y + H} C${a.x + W / 2},${a.y + H + 40} ${b.x + W / 2},${b.y + H + 40} ${b.x + W / 2},${b.y + H}`
+			: `M${x1},${y1} C${x1 + 35},${y1} ${x2 - 35},${y2} ${x2},${y2}`;
+		svg += `<path d="${d}" marker-end="url(#ar)" class="${e.from === cur || e.to === cur ? "hl" : ""}"/>`;
+	}
+	for (const n of shown) {
+		const p = pos.get(n.id);
+		const label = n.external ? (n.file ? n.file.split("/").pop() : "başka dosya / oyun") : (n.name || "");
+		svg += `<g class="node${n.id === cur ? " cur" : ""}${n.external ? " ext" : ""}${n.hidden ? " hidden" : ""}" data-id="${esc(n.id)}" data-file="${esc(n.file || "")}" data-ext="${n.external ? 1 : 0}" transform="translate(${p.x},${p.y})">
+			<rect width="${W}" height="${H}" rx="5"/><text x="8" y="17" style="font-weight:600">${esc(n.id)}${n.hidden ? " (gizli)" : ""}</text>
+			<text x="8" y="33" style="fill:#bbb">${esc(label.length > 30 ? label.slice(0, 29) + "…" : label)}</text></g>`;
+	}
+	svg += `</svg>`;
+	el.innerHTML = `<div class="small" style="margin-bottom:6px">Oklar "tetikler" demek. Kesik çerçeveli kutular başka dosyadaki ya da oyundaki olaylar. Bir kutuya tıkla.</div><div style="overflow:auto">${svg}</div>`;
+	el.querySelectorAll(".node").forEach((g) => (g.onclick = () => {
+		if (g.dataset.ext === "1") { if (g.dataset.file) location.href = `/events.html?file=${encodeURIComponent(g.dataset.file)}&id=${encodeURIComponent(g.dataset.id)}`; else Studio.toast("Bu olay modda değil (oyunun kendi olayı olabilir)."); }
+		else pg.select(g.dataset.id);
+	}));
+}
+
+async function drawUsage(pg, el) {
+	const m = pg.item, id = pg.id;
+	if (refsCache.id !== id) refsCache = { id, html: null };
+	const link = (eid) => `<span class="chip" data-ev="${esc(eid)}">${esc(eid)}</span>`;
+	el.innerHTML = `<h3>Bu olayı tetikleyen olaylar (mod)</h3><div class="chips">${(m.firedBy || []).map(link).join("") || `<span class="small">Yok.</span>`}</div>
+		<h3>Bu olayın tetiklediği olaylar</h3><div class="chips">${(m.fires || []).map(link).join("") || `<span class="small">Yok.</span>`}</div>
+		<h3>Başka yerlerdeki kullanımlar (odaklar, kararlar, on_actions…)</h3><div id="refs">${refsCache.html || `<div class="small">Yükleniyor…</div>`}</div>`;
+	el.querySelectorAll("[data-ev]").forEach((c) => (c.onclick = () => {
+		const target = c.dataset.ev;
+		if (pg.list.items.some((r) => r.id === target)) pg.select(target);
+		else Studio.api("/api/search?q=" + encodeURIComponent(target)).then(({ results }) => {
+			const hit = results.find((r) => r.id === target && r.module === "event");
+			if (hit) location.href = hit.url; else Studio.toast("Bu olay modda bulunamadı.");
+		});
+	}));
+	if (!refsCache.html) {
+		const html = await pg.refsHtml(id);
+		refsCache = { id, html };
+		const box = document.getElementById("refs"); if (box && pg.id === id) box.innerHTML = html;
+	}
+}
+
+page.init();
+</script>
+</body>
+</html>

@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="studio-token" content="__EDITOR_TOKEN__">
+<title>Karakterler · HOI4 Türkçe Mod Toolu</title>
+<link rel="stylesheet" href="/static/studio.css">
+<style>
+.char-card { display: flex; gap: 14px; max-width: 640px; }
+.char-card .portrait { width: 156px; height: 210px; object-fit: cover; background: #1f2227; border: 1px solid #6b6458; flex: 0 0 156px; }
+.char-card .info { min-width: 0; flex: 1; }
+.role { border-top: 1px solid #4a4538; padding-top: 6px; margin-top: 8px; }
+.role .rl { color: #f3d58a; font-weight: 600; }
+.traits { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.trait { font-size: 11.5px; padding: 1px 7px; border-radius: 9px; background: #3a3426; border: 1px solid #6b6458; }
+.portraits { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.portraits .slot { border: 1px solid var(--line); border-radius: 6px; padding: 6px; background: #262a31; }
+.portraits .slot .pic { height: 108px; display: flex; align-items: center; justify-content: center; background: #1f2227; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; margin-bottom: 4px; }
+.portraits .slot .pic img { max-width: 100%; max-height: 104px; }
+.portraits .slot input { width: 100%; }
+.smalls { display: flex; gap: 8px; margin-top: 10px; }
+.smalls img { height: 64px; border: 1px solid var(--line); background: #1f2227; }
+.tmods { margin-top: 3px; line-height: 1.5; }
+.tmods .hoi-mod { font-size: 12px; }
+.tcard .head .k { margin-left: 6px; }
+.tcard .meta { margin: 2px 0 4px; }
+</style>
+</head>
+<body>
+<div class="toolbar" id="toolbar"></div>
+<div class="page3"><div class="pane list" id="list"></div><div class="pane center" id="center"></div><div class="pane form" id="form"></div></div>
+<datalist id="traitList"></datalist>
+<datalist id="modList"></datalist>
+<div class="modal" id="ncModal"><div class="box form-box">
+	<div class="top"><b style="color:var(--gold)">Yeni karakter</b><span class="spacer"></span><button id="ncClose">Kapat</button></div>
+	<div class="body" id="ncBody"></div>
+</div></div>
+<script src="/static/studio.js"></script>
+<script src="/static/studio-schema.js"></script>
+<script src="/static/studio-script.js"></script>
+<script>
+"use strict";
+/* Characters (common/characters): portraits, roles and the name of each character.
+ * Portraits are a structured widget; role blocks (country_leader, advisor, commanders) are text
+ * blocks with templates; the preview reads the roles back from the edited text. */
+Studio.initNav("characters");
+const esc = Studio.esc;
+const ROLE_LABELS = { country_leader: "Ülke lideri", advisor: "Danışman", corps_commander: "Kolordu komutanı", field_marshal: "Mareşal",
+	navy_leader: "Amiral", scientist: "Bilim insanı", operative: "Ajan" };
+const ROLES = Object.keys(ROLE_LABELS);
+const KINDS = [["civilian", "Sivil"], ["army", "Asker"], ["navy", "Donanma"]];
+const SIZES = [["large", "büyük"], ["small", "küçük"]];
+const countries = {};
+let ideologies = [];
+let refsCache = { id: null, html: "" };
+let traitData = null;  /* advisor and leader trait names (English) */
+
+const quoted = (v) => (/[\s\/\\]/.test(v) ? `"${v}"` : v);
+function parsePortraits(body) {
+	const clean = body.split("\n").map((l) => l.replace(/#.*$/, "")).join("\n");
+	const P = { civilian: {}, army: {}, navy: {} };
+	let rest = clean;
+	for (const m of clean.matchAll(/\b(civilian|army|navy)\s*=\s*\{([^{}]*)\}/g)) {
+		for (const s of m[2].matchAll(/\b(large|small)\s*=\s*("[^"]*"|[^\s{}]+)/g)) P[m[1]][s[1]] = s[2].replace(/^"|"$/g, "");
+		rest = rest.replace(m[0], "");
+	}
+	return rest.trim() ? null : P;
+}
+function buildPortraits(P) {
+	const parts = [];
+	for (const [kind] of KINDS) {
+		const sizes = SIZES.map(([s]) => s).filter((s) => P[kind][s]);
+		if (sizes.length) parts.push(`${kind} = {\n${sizes.map((s) => `\t${s} = ${quoted(P[kind][s])}`).join("\n")}\n}`);
+	}
+	return parts.join("\n");
+}
+function roleInfo(key, body) {
+	const clean = body.split("\n").map((l) => l.replace(/#.*$/, "")).join("\n");
+	const get = (k) => (clean.match(new RegExp("\\b" + k + "\\s*=\\s*\"?([A-Za-z0-9_.\\-]+)")) || [])[1] || "";
+	const traits = ((clean.match(/\btraits\s*=\s*\{([^}]*)\}/) || [])[1] || "").split(/\s+/).filter(Boolean);
+	const skills = ["skill", "attack_skill", "defense_skill", "planning_skill", "logistics_skill", "maneuvering_skill", "coordination_skill"].map((k) => [k, get(k)]).filter(([, v]) => v);
+	return { role: key, ideology: get("ideology"), slot: get("slot"), cost: get("cost"), traits, skills };
+}
+const groupOf = (sub) => (ideologies.find((g) => g.types.includes(sub)) || {}).group || "";
+const instanceBased = (ed) => ed.model.instances > 0 && !ed.get("name");
+
+Studio.api("/api/country/list").then(({ countries: rows }) => { rows.forEach((c) => (countries[c.tag] = c.name)); if (page.list) page.renderList(); }).catch(() => {});
+Studio.api("/api/country/ideologies").then(({ ideologies: rows }) => (ideologies = rows)).catch(() => {});
+Studio.api("/api/country/traits").then((t) => {
+	document.getElementById("traitList").innerHTML = [...t.country, ...t.unit].map((n) => `<option value="${esc(n)}">`).join("");
+}).catch(() => {});
+
+const COMMANDER = (skill) => `traits = { }\nskill = ${skill}\nattack_skill = ${skill}\ndefense_skill = ${skill}\nplanning_skill = ${skill}\nlogistics_skill = ${skill}\nlegacy_id = -1`;
+const page = new ItemPage({
+	kind: "character",
+	label: "Karakterler",
+	group: (r) => r.tag || "",
+	groupLabel: (g) => (countries[g] ? `${g} · ${countries[g]}` : g),
+	iconOf: (r) => r.portrait || "GFX_portrait_unknown",
+	subOf: (r) => (r.roles || []).map((x) => ROLE_LABELS[x] || x).join(", "),
+	nameKey: (pg) => pg.item.nameKey || pg.id,
+	/* the edited name; a nested `$key$` reference shows as the server's resolved name */
+	title: (pg) => { const raw = pg.item.nameKey ? pg.editor.loc[pg.item.nameKey] : pg.editor.scalar("name"); return raw && !raw.includes("$") ? raw : pg.item.name; },
+	editor: {
+		/* a character written as DLC `instance` blocks keeps its fields inside them, not at the top */
+		scalarsFor: (ed) => (instanceBased(ed) ? {} : {
+			name: { label: "İsim", type: "text", help: "yerelleştirme anahtarı ya da düz metin" },
+			gender: { label: "Cinsiyet", type: "text", help: "male / female; gerekmedikçe yazma" },
+		}),
+		blocks: {
+			country_leader: { label: "Ülke lideri", help: "ideology bir alt ideolojidir (ör. conservatism, marxism, nazism, despotism).",
+				template: 'ideology = despotism\ntraits = { }\nexpire = "1965.1.1.1"\nid = -1' },
+			advisor: { label: "Danışman", help: "slot: political_advisor, theorist, army_chief, navy_chief, air_chief, high_command",
+				template: (ed) => `slot = political_advisor\nidea_token = ${ed.model.id}\nallowed = {\n\toriginal_tag = ${ed.model.meta.tag || "TAG"}\n}\ntraits = { }\ncost = 150\nai_will_do = {\n\tfactor = 1\n}` },
+			corps_commander: { label: "Kolordu komutanı", template: COMMANDER(2) },
+			field_marshal: { label: "Mareşal", template: COMMANDER(3) },
+			navy_leader: { label: "Amiral", template: "traits = { }\nskill = 2\nattack_skill = 2\ndefense_skill = 2\nmaneuvering_skill = 2\ncoordination_skill = 2\nlegacy_id = -1" },
+			scientist: { label: "Bilim insanı", help: "skills = { specialization_... = N } ve traits" },
+			instance: { label: "Sürüm (instance)", help: "DLC'ye göre değişen karakter tanımı" },
+		},
+		special: { portraits: true, advisor: true },
+		locFields: (ed) => (ed.model.nameKey ? [{ key: ed.model.nameKey, label: "İsim (İngilizce)" }] : []),
+		renderSpecial: (ed, el) => {
+			el.innerHTML = `<div id="chPor"></div><div id="chLead"></div><div id="chAdv"></div><div id="chTraits"></div>`;
+			renderPortraits(ed, el.querySelector("#chPor"));
+			renderLeaderTraits(ed, el.querySelector("#chLead"));
+			renderAdvisors(ed, el.querySelector("#chAdv"));
+			renderTraitMods(ed, el.querySelector("#chTraits"));
+		},
+	},
+	renderCenter: (pg, el) => renderCenter(pg, el),
+	create: (pg) => openNewCharacter(pg),
+});
+
+function renderPortraits(ed, el) {
+	if (instanceBased(ed)) {
+		el.innerHTML = `<div class="warn">Bu karakter DLC'ye göre ${ed.model.instances} ayrı <code>instance</code> bloğu içeriyor. Portre ve rolleri aşağıdaki bloklarda ya da ham kodda düzenle; önizleme ilk instance'ı gösterir.</div>`;
+		return;
+	}
+	const entry = ed.get("portraits");
+	const body = entry ? entry.body : "";
+	const P = parsePortraits(body);
+	if (P === null) {
+		el.innerHTML = `<h3>Portreler</h3><div class="warn">Bu portre bloğu beklenmeyen bir yapı içeriyor; metin olarak düzenle.</div>
+			<textarea class="code" id="porRaw" rows="7" spellcheck="false">${esc(body)}</textarea>`;
+		const ta = el.querySelector("#porRaw"); Studio.codeArea(ta);
+		ta.addEventListener("input", () => { if (entry) { entry.body = ta.value; ed.changed(); } });
+		return;
+	}
+	const commit = () => {
+		const text = buildPortraits(P);
+		const e = ed.get("portraits");
+		if (e) { e.body = text; ed.changed(); } else if (text) ed.addBlock("portraits", text);
+	};
+	el.innerHTML = `<h3>Portreler</h3><div class="portraits">${KINDS.map(([kind, kl]) => SIZES.map(([size, sl]) => `
+		<div class="slot"><div class="small">${kl} · ${sl}</div>
+			<div class="pic" data-pick="${kind}.${size}" title="Portre seç">${P[kind][size] ? `<img src="${Studio.imageUrl(P[kind][size])}" onerror="this.style.opacity=.15">` : `<span class="small">yok</span>`}</div>
+			<input data-v="${kind}.${size}" value="${esc(P[kind][size] || "")}" placeholder="GFX_portrait_… ya da gfx/leaders/…"></div>`).join("")).join("")}</div>
+		<div class="small" style="margin-top:4px">Sivil portre siyasi roller, asker portre kara komutanları, donanma portresi amiraller için kullanılır; küçük portre danışman kartında görünür. Kutuya tıklayınca portre seçici açılır.</div>`;
+	el.querySelectorAll("[data-v]").forEach((inp) => inp.addEventListener("change", () => {
+		const [kind, size] = inp.dataset.v.split(".");
+		if (inp.value.trim()) P[kind][size] = inp.value.trim(); else delete P[kind][size];
+		commit(); ed.render();
+	}));
+	el.querySelectorAll("[data-pick]").forEach((box) => box.addEventListener("click", async () => {
+		const [kind, size] = box.dataset.pick.split(".");
+		const family = size === "small" ? "advisor_card" : kind === "civilian" ? "leader_portrait" : "commander_portrait";
+		const picked = await Studio.pickIcon({ prefix: "GFX_", query: "portrait " + (ed.model.meta.tag || ""),
+			gen: { family, families: ["leader_portrait", "commander_portrait", "advisor_card"], kind: "character", file: ed.model.file, id: ed.model.id } });
+		if (!picked) return;
+		P[kind][size] = picked.name; commit(); ed.render();
+	}));
+}
+
+async function renderCenter(pg, el) {
+	const ed = pg.editor, id = pg.id;
+	const name = pg.cfg.title(pg) || id;
+	let P = { civilian: {}, army: {}, navy: {} }, roles;
+	if (instanceBased(ed)) {
+		P = { civilian: {}, army: {}, navy: {}, ...pg.item.portraits };
+		roles = pg.item.roles.map((r) => ({ ...r, traits: r.traits || [], skills: r.skill ? [["skill", r.skill]] : [] }));
+	} else {
+		const portraits = ed.get("portraits");
+		P = (portraits && parsePortraits(portraits.body)) || P;
+		roles = ed.entries.filter((e) => e.type === "block" && ROLES.includes(e.key) && !e.removed).map((e) => roleInfo(e.key, e.body));
+	}
+	const big = P.civilian.large || P.army.large || P.navy.large || P.civilian.small || P.army.small || P.navy.small || "GFX_portrait_unknown";
+	const smalls = [P.civilian.small, P.army.small, P.navy.small].filter(Boolean);
+	if (refsCache.id !== id) refsCache = { id, html: `<div class="small">Yükleniyor…</div>` };
+	el.innerHTML = `<h3>Oyundaki görünüm</h3>
+		<div class="hoi-card char-card"><img class="portrait" src="${Studio.imageUrl(big)}" onerror="this.style.opacity=.15">
+			<div class="info"><div class="hoi-title">${Studio.locHtml(name)}</div><div class="small">${esc(id)}${pg.item.meta.tag ? " · " + esc(countries[pg.item.meta.tag] || pg.item.meta.tag) : ""}</div>
+			${roles.map((r) => `<div class="role"><span class="rl">${esc(ROLE_LABELS[r.role] || r.role)}</span>
+				${r.ideology ? `<span class="small"> · ${esc(r.ideology)}${groupOf(r.ideology) ? " (" + esc(groupOf(r.ideology)) + ")" : ideologies.length ? ' <span class="err">bilinmeyen alt ideoloji</span>' : ""}</span>` : ""}
+				${r.slot ? `<span class="small"> · ${esc(Studio.SLOT_LABELS[r.slot] || r.slot)}${r.cost ? " · " + esc(r.cost) + " siyasi güç" : ""}</span>` : ""}
+				${r.skills && r.skills.length ? `<div class="small">${r.skills.map(([k, v]) => `${esc(k.replace("_skill", ""))} ${esc(v)}`).join(" · ")}</div>` : ""}
+				${r.traits.length ? `<div class="traits">${r.traits.map((t) => `<span class="trait" title="${esc(t)}">${esc(Studio.traitLabel(traitData, t))}</span>`).join("")}</div>${traitModsHtml(r.traits)}` : ""}</div>`).join("")
+				|| `<div class="small" style="margin-top:8px">Rolü yok: bir ülkede işe alınsa bile bir göreve atanmaz.</div>`}
+			${smalls.length ? `<div class="smalls">${smalls.map((s) => `<img src="${Studio.imageUrl(s)}" title="${esc(s)}" onerror="this.style.opacity=.15">`).join("")}</div>` : ""}</div></div>
+		<div class="small" style="margin-top:6px">${esc(big)}</div>
+		<h3>Kullanıldığı yerler</h3><div id="refs">${refsCache.html}</div>`;
+	if (refsCache.html.includes("Yükleniyor")) {
+		const html = await pg.refsHtml(id);
+		refsCache = { id, html };
+		const box = document.getElementById("refs"); if (box && pg.id === id) box.innerHTML = html;
+	}
+}
+/* Advisor roles as a form: job (slot), cost, ledger and traits; the conditions (allowed, visible,
+ * available, ai_will_do) stay text in the block's code box. A character may hold several advisor roles,
+ * each with its own idea_token. */
+function advisorTemplate(ed, slot) {
+	const others = ed.all("advisor").length;
+	const token = others ? `${ed.model.id}_${slot}` : ed.model.id;
+	const ledger = Studio.SLOT_LEDGER[slot] ? `\nledger = ${Studio.SLOT_LEDGER[slot]}` : "";
+	return `slot = ${slot}\nidea_token = ${token}${ledger}\nallowed = {\n\toriginal_tag = ${ed.model.meta.tag || "TAG"}\n}\ntraits = {\n}\ncost = 150\nai_will_do = {\n\tfactor = 1\n}`;
+}
+/* Country leader traits: the `traits = { }` list of each country_leader block as chips chosen from the
+ * game's and the mod's leader traits, and a button that creates a new trait (common/country_leader/
+ * <TAG>_traits.txt, /api/trait/create) and gives it to this leader. Its modifiers are then edited in
+ * the trait's own table below ("Özellik modifier'ları"). */
+function renderLeaderTraits(ed, el) {
+	const blocks = ed.entries.filter((e) => e.key === "country_leader" && e.type === "block" && !e.removed);
+	if (instanceBased(ed) || !blocks.length || typeof StudioScript === "undefined" || !StudioScript) { el.innerHTML = ""; return; }
+	el.innerHTML = `<h3>Liderlik özellikleri</h3>${blocks.map((e, i) => `<div class="section"><div class="head"><b>Ülke lideri${blocks.length > 1 ? " #" + (i + 1) : ""}</b>
+			<span class="k">${esc(Studio.kvGet(e.body, "ideology") || "")}</span><span class="spacer"></span>
+			<button class="small" data-newtrait="${i}" title="Yeni bir özellik oluştur ve bu lidere ver">＋ Yeni özellik</button></div>
+		<div data-ltraits="${i}"></div></div>`).join("")}
+		<div class="small">Özelliği listeden seç ya da yenisini oluştur. Değişiklik, sayfanın <b>Kaydet</b> düğmesiyle karakter dosyasına yazılır.</div>`;
+	const setTraits = (e, list) => { e.body = Studio.listSet(e.body, "traits", list); ed.changed(); ed.render(); };
+	el.querySelectorAll("[data-ltraits]").forEach((host) => {
+		const e = blocks[+host.dataset.ltraits];
+		StudioScript.picks(host, { of: "leader_trait", values: Studio.listGet(e.body, "traits"), add: "Özellik ekle", empty: "Özelliği yok.",
+			prefer: (ed.model.meta.tag || "") + "_", onChange: (list) => setTraits(e, list) });
+	});
+	el.querySelectorAll("[data-newtrait]").forEach((b) => (b.onclick = () => newLeaderTrait(ed, blocks[+b.dataset.newtrait], setTraits)));
+}
+async function newLeaderTrait(ed, e, setTraits) {
+	const tag = ed.model.meta.tag || (ed.model.id.match(/^([A-Z][A-Z0-9]{2})_/) || [])[1] || "";
+	if (!tag) { Studio.toast("Karakterin ülkesi bulunamadı; özelliğin yazılacağı dosya seçilemiyor.", true); return; }
+	const answer = await Studio.ask({ title: "Yeni lider özelliği", ok: "Oluştur",
+		intro: `Özellik <code>common/country_leader/${esc(tag)}_traits.txt</code> dosyasına yazılır ve bu lidere verilir. Etkilerini (siyasi güç, istikrar…) oluşturduktan sonra aşağıdaki tablodan eklersin.`,
+		fields: [
+			{ key: "name", label: "Adı", help: "oyunda görünen İngilizce ad, ör. Caliph", placeholder: "Caliph" },
+			{ key: "id", type: "id", from: "name", prefix: tag + "_", label: "Kimlik (id)", help: "kendiliğinden doldurulur" },
+		] });
+	if (!answer) return;
+	try {
+		const result = await Studio.api("/api/trait/create", { id: answer.id, name: answer.name, tag });
+		StudioScript.Catalog.drop("leader_trait");
+		traitEdits[result.id] = { detail: result, rows: [], dirty: false };
+		setTraits(e, [...Studio.listGet(e.body, "traits"), result.id]);
+		Studio.toast(`Özellik oluşturuldu: ${result.id}. Etkilerini aşağıdaki tablodan ekleyip özelliği kaydet, sonra karakteri kaydet.`, false, 8000);
+		const card = document.querySelector(`[data-trait="${CSS.escape(result.id)}"]`);
+		if (card) card.scrollIntoView({ block: "center" });
+	} catch (err) { Studio.toast("Oluşturulamadı: " + err.message, true, 8000); }
+}
+
+/* The condition blocks of an advisor role, each drawn by the script builder. They live inside the
+ * `advisor = { }` block, so a change rewrites that one sub-block and leaves the rest of the role as it is. */
+const ADVISOR_CONDITIONS = [
+	{ key: "allowed", label: "Kimler işe alabilir", mode: "trigger", desc: "Oyun başında bir kez kontrol edilir (ör. original_tag = SYR)." },
+	{ key: "visible", label: "Listede görünmesi için", mode: "trigger", desc: "Doğru değilse danışman listede hiç görünmez." },
+	{ key: "available", label: "İşe alınabilmesi için", mode: "trigger", desc: "Doğru değilse görünür ama alınamaz." },
+	{ key: "ai_will_do", label: "Yapay zekâ ağırlığı", mode: "ai", desc: "Yapay zekânın bu danışmanı alma isteği." },
+];
+function subBlockText(body, key) {
+	const n = Script.find(Script.parse(body), key);
+	return n && Script.isBlock(n) ? Script.stringify(n.children) : "";
+}
+function setSubBlock(body, key, text) {
+	const nodes = Script.parse(body);
+	const at = nodes.findIndex((n) => !Script.isComment(n) && n.key === key);
+	if (!text.trim()) { if (at >= 0) nodes.splice(at, 1); }
+	else if (at >= 0 && Script.isBlock(nodes[at])) nodes[at].children = Script.parse(text);
+	else if (at >= 0) nodes[at] = Script.blockNode(key, Script.parse(text), false);
+	else nodes.push(Script.blockNode(key, Script.parse(text), false));
+	return Script.stringify(nodes);
+}
+function drawAdvisorConditions(ed, e, el, edit) {
+	if (typeof StudioScript === "undefined" || !StudioScript) return;
+	/* a role written in a way the reader cannot give back token for token stays in the code box */
+	if (!Script.safe(e.body)) { el.innerHTML = `<div class="small" style="margin-top:6px">Koşullar aşağıdaki kod kutusunda düzenlenir.</div>`; return; }
+	el.innerHTML = ADVISOR_CONDITIONS.map((c, i) => `<div class="sbSection"><div class="t"><b>${esc(c.label)}</b><code>${esc(c.key)}</code></div>
+		<div class="d">${esc(c.desc)}</div><div data-cond="${i}"></div></div>`).join("");
+	el.querySelectorAll("[data-cond]").forEach((host) => {
+		const c = ADVISOR_CONDITIONS[+host.dataset.cond];
+		StudioScript.builder(host, ed.builderOptions({ script: c.mode, scope: "country" }, subBlockText(e.body, c.key),
+			(text) => edit((b) => setSubBlock(b, c.key, text)), ed.raw !== null));
+	});
+}
+function renderAdvisors(ed, el) {
+	const blocks = ed.entries.filter((e) => e.key === "advisor" && e.type === "block");
+	const instanced = instanceBased(ed);
+	if (instanced && !blocks.length) { el.innerHTML = ""; return; }
+	const K = Studio;
+	el.innerHTML = `<h3>Danışmanlık</h3>${blocks.map((e, i) => {
+		const slot = K.kvGet(e.body, "slot"), cls = e.removed ? "removed" : e.isNew ? "added" : e.body !== e.orig ? "changed" : "";
+		const slots = K.ADVISOR_SLOTS.some((s) => s.id === slot) ? K.ADVISOR_SLOTS : [{ id: slot, label: slot || "(yazılmamış)" }, ...K.ADVISOR_SLOTS];
+		const ledger = K.kvGet(e.body, "ledger"), tag = K.kvGet(e.body, "original_tag");
+		return `<div class="section ${cls}" data-adv="${i}"><div class="head"><b>${esc(K.SLOT_LABELS[slot] || "Danışman")}</b><span class="k">advisor${blocks.length > 1 ? " #" + (i + 1) : ""}</span><span class="spacer"></span>
+				${e.removed ? `<button class="small" data-advundo>Geri al</button>` : `<button class="small" data-advdel title="Bu danışmanlık rolünü kaldır">Kaldır</button>`}</div>
+			${e.removed ? "" : `<div class="row">
+				<div class="field"><label>Görev</label><select data-f="slot">${slots.map((s) => `<option value="${esc(s.id)}" ${s.id === slot ? "selected" : ""}>${esc(s.label)}</option>`).join("")}</select></div>
+				<div class="field" style="flex:0 0 96px"><label>Maliyet</label><input data-f="cost" type="number" min="1" value="${esc(K.kvGet(e.body, "cost"))}" placeholder="150"></div>
+				<div class="field" style="flex:0 0 96px"><label>Alan</label><select data-f="ledger">${K.LEDGERS.map(([v, l]) => `<option value="${v}" ${ledger === v ? "selected" : ""}>${esc(l)}</option>`).join("")}${ledger && !K.LEDGERS.some(([v]) => v === ledger) ? `<option selected>${esc(ledger)}</option>` : ""}</select></div></div>
+			<div class="small" style="margin-bottom:4px">idea_token: <code>${esc(K.kvGet(e.body, "idea_token") || "yok")}</code>${tag ? ` · yalnızca ${esc(countries[tag] || tag)} işe alabilir` : ""}</div>
+			<div data-traits></div>
+			<div data-conds></div>
+			<details style="margin-top:6px"><summary class="small">Kod (danışmanlık bloğunun tamamı)</summary>
+				<textarea class="code" data-code rows="${Math.min(18, Math.max(4, (e.body.match(/\n/g) || []).length + 2))}" spellcheck="false">${esc(e.body)}</textarea></details>`}
+		</div>`;
+	}).join("")}
+	${instanced ? "" : `<button id="advAdd">＋ Danışmanlık rolü ekle</button> <span class="small">Ülke sayfasındaki <b>＋ Danışman ekle</b> düğmesi kişiyi ülkeye işe almayı da yapar.</span>`}`;
+	el.querySelectorAll("[data-adv]").forEach((box) => {
+		const e = blocks[+box.dataset.adv];
+		const edit = (fn) => { e.body = fn(e.body); box.className = "section " + (e.isNew ? "added" : e.body !== e.orig ? "changed" : ""); const ta = box.querySelector("[data-code]"); if (ta) ta.value = e.body; ed.changed(); };
+		const del = box.querySelector("[data-advdel]"), undo = box.querySelector("[data-advundo]");
+		if (del) del.onclick = () => { ed.remove(e); ed.render(); };
+		if (undo) undo.onclick = () => { e.removed = false; ed.changed(); ed.render(); };
+		if (e.removed) return;
+		const chooser = K.traitChooser(box.querySelector("[data-traits]"), { slot: K.kvGet(e.body, "slot"), selected: K.listGet(e.body, "traits"), tag: ed.model.meta.tag,
+			onChange: (list) => edit((b) => K.listSet(b, "traits", list)) });
+		box.querySelector('[data-f="slot"]').onchange = (ev) => {
+			const slot = ev.target.value;
+			edit((b) => { let out = K.kvSet(b, "slot", slot); if (K.SLOT_LEDGER[slot]) out = K.kvSet(out, "ledger", K.SLOT_LEDGER[slot]); return out; });
+			box.querySelector(".head b").textContent = K.SLOT_LABELS[slot] || "Danışman";
+			if (K.SLOT_LEDGER[slot]) box.querySelector('[data-f="ledger"]').value = K.SLOT_LEDGER[slot];
+			chooser.setSlot(slot);
+		};
+		box.querySelector('[data-f="cost"]').addEventListener("input", (ev) => { const v = ev.target.value.trim(); if (v === "" || /^\d+$/.test(v)) edit((b) => K.kvSet(b, "cost", v)); });
+		box.querySelector('[data-f="ledger"]').onchange = (ev) => edit((b) => K.kvSet(b, "ledger", ev.target.value));
+		drawAdvisorConditions(ed, e, box.querySelector("[data-conds]"), edit);
+		const ta = box.querySelector("[data-code]");
+		Studio.codeArea(ta);
+		ta.addEventListener("input", () => { e.body = ta.value; ed.changed(); });
+		ta.addEventListener("change", () => ed.render());
+	});
+	const add = el.querySelector("#advAdd");
+	if (add) add.onclick = () => { ed.addBlock("advisor", advisorTemplate(ed, "political_advisor")); ed.render(); };
+}
+
+/* ---------------- trait modifiers ----------------
+ * Each country-leader or advisor trait of the character (common/country_leader) gets a modifier table.
+ * The table saves with its own button into the trait file (/api/trait/save); a trait can be shared by
+ * several characters, so the change applies to all of them. Edits are kept per trait id while the page
+ * is open, so switching characters does not lose them. */
+const traitEdits = {};  /* id -> { detail, rows: [{key, value}], dirty } or { error } */
+const TRAIT_ROLES = ["country_leader", "advisor"];
+const modLabels = {};
+Studio.api("/api/idea/modifiers").then(({ names }) => {
+	document.getElementById("modList").innerHTML = names.map((n) => `<option value="${n}">`).join("");
+}).catch(() => {});
+function fmtMod(key, value) {
+	const n = parseFloat(value);
+	if (isNaN(n)) return esc(value);
+	const pct = /factor/.test(key);
+	const shown = pct ? Math.round(n * 1000) / 10 + "%" : String(Math.round(n * 1000) / 1000);
+	return (n > 0 ? "+" : "") + shown;
+}
+function charTraits(ed) {
+	const found = [];
+	if (instanceBased(ed)) (ed.model.roles || []).filter((r) => TRAIT_ROLES.includes(r.role)).forEach((r) => found.push(...(r.traits || [])));
+	else ed.entries.filter((e) => e.type === "block" && TRAIT_ROLES.includes(e.key) && !e.removed).forEach((e) => found.push(...roleInfo(e.key, e.body).traits));
+	return [...new Set(found)];
+}
+const traitLoads = {};
+function loadTrait(id, force = false) {
+	if (!force && traitEdits[id]) return Promise.resolve(traitEdits[id]);
+	if (!force && traitLoads[id]) return traitLoads[id];
+	traitLoads[id] = Studio.api("/api/trait/detail?id=" + encodeURIComponent(id)).then((detail) => {
+		detail.modifiers.forEach((m) => (modLabels[m.key] = m.label));
+		traitEdits[id] = { detail, rows: detail.modifiers.map((m) => ({ key: m.key, value: m.value })), dirty: false };
+	}).catch((e) => { traitEdits[id] = { error: e.message }; }).then(() => { delete traitLoads[id]; return traitEdits[id]; });
+	return traitLoads[id];
+}
+async function labelFor(key) {
+	if (!key || key in modLabels) return;
+	try { const { labels } = await Studio.api("/api/idea/labels?keys=" + encodeURIComponent(key)); Object.assign(modLabels, labels); } catch (e) { /* labels are optional */ }
+}
+function traitModsHtml(traits) {
+	const lines = traits.flatMap((t) => (traitEdits[t] && traitEdits[t].rows ? traitEdits[t].rows.filter((r) => r.key && r.value) : []));
+	return lines.length ? `<div class="tmods">${lines.map((r) => `<div class="hoi-mod">${esc(modLabels[r.key] || r.key)}: <b>${fmtMod(r.key, r.value)}</b></div>`).join("")}</div>` : "";
+}
+function renderTraitMods(ed, el) {
+	const ids = charTraits(ed);
+	if (!ids.length) { el.innerHTML = ""; return; }
+	el.innerHTML = `<h3>Özellik modifier'ları</h3><div class="small" style="margin-bottom:6px">Liderlik ve danışmanlık özelliklerinin etkileri. Her özellik kendi <b>Kaydet</b> düğmesiyle kaydedilir; özelliği kullanan bütün karakterler değişir.</div>
+		${ids.map((id) => `<div class="section tcard" data-trait="${esc(id)}"><div class="small">Yükleniyor…</div></div>`).join("")}`;
+	ids.forEach(async (id) => {
+		const known = !!traitEdits[id];
+		await loadTrait(id);
+		const box = el.querySelector(`[data-trait="${CSS.escape(id)}"]`);
+		if (box) drawTrait(box, id);
+		if (!known) page.changed();
+	});
+}
+function drawTrait(box, id) {
+	const T = traitEdits[id];
+	if (T.error) {
+		box.innerHTML = `<div class="head"><b>${esc(Studio.traitLabel(traitData, id))}</b><span class="k">${esc(id)}</span></div>
+			<div class="small">${T.error.includes("no trait") ? "Bu özellik common/country_leader içinde bulunamadı." : esc(T.error)}</div>`;
+		return;
+	}
+	const D = T.detail, rows = T.rows;
+	const known = Object.fromEntries(D.modifiers.map((m) => [m.key, m]));
+	box.className = "section tcard" + (T.dirty ? " changed" : "");
+	box.innerHTML = `<div class="head"><b>${esc(D.name || id)}</b><span class="k">${esc(id)}</span><span class="spacer"></span>
+			${T.dirty ? `<button class="small" data-undo>Geri al</button> ` : ""}<button class="small primary" data-save ${T.dirty ? "" : "disabled"}>Kaydet</button></div>
+		<div class="small meta"><code>${esc(D.file)}</code>${D.vanilla ? ` · <span class="err">oyunun dosyası: kaydedince moda kopyalanır</span>` : ""}</div>
+		<table class="mods">${rows.map((r, i) => { const c = known[r.key]; return `<tr>
+			<td><input list="modList" data-k="${i}" value="${esc(r.key)}" placeholder="modifier"></td>
+			<td class="v"><input data-v="${i}" value="${esc(r.value)}" placeholder="0.05"></td>
+			<td class="x"><button class="small" data-x="${i}" title="Kaldır">✕</button></td></tr>
+			<tr><td colspan="3" class="small" style="padding-bottom:4px">${esc(modLabels[r.key] || "")}${r.key && r.value ? " · " + fmtMod(r.key, r.value) : ""}${c && c.constant ? ` · sabit <code>${esc(c.constant)}</code>${c.shared ? ' <span class="err">(başka yerde de kullanılıyor)</span>' : ""}` : ""}</td></tr>`; }).join("")}</table>
+		<button class="small" data-add>＋ Modifier ekle</button> <span class="small">Değerler ondalık: 0.1 = %10, -0.25 = %25 azaltma</span>
+		${D.other.length ? `<div class="small" style="margin-top:4px">Diğer satırlar (değişmez): ${D.other.map(esc).join(" · ")}</div>` : ""}`;
+	const touch = () => { T.dirty = true; box.className = "section tcard changed"; box.querySelector("[data-save]").disabled = false; page.changed(); };
+	box.querySelectorAll("[data-k]").forEach((inp) => inp.addEventListener("change", async () => { rows[+inp.dataset.k].key = inp.value.trim(); touch(); await labelFor(inp.value.trim()); drawTrait(box, id); }));
+	box.querySelectorAll("[data-v]").forEach((inp) => {
+		inp.addEventListener("input", () => { rows[+inp.dataset.v].value = inp.value.trim(); touch(); });
+		inp.addEventListener("change", () => drawTrait(box, id));
+	});
+	box.querySelectorAll("[data-x]").forEach((b) => (b.onclick = () => { rows.splice(+b.dataset.x, 1); touch(); drawTrait(box, id); }));
+	box.querySelector("[data-add]").onclick = async () => {
+		/* the modifier is chosen from the game's list by its tooltip name (political power, stability, ...) */
+		const picked = typeof StudioScript !== "undefined" && StudioScript ? await StudioScript.Picker.open({ type: "modifier", title: "Modifier seç" }) : "";
+		if (picked === null) return;
+		if (picked && rows.some((r) => r.key === picked)) { Studio.toast("Bu modifier zaten tabloda."); return; }
+		rows.push({ key: picked || "", value: "0.05" }); touch();
+		await labelFor(picked);
+		drawTrait(box, id);
+		const v = box.querySelectorAll("[data-v]"); v[v.length - 1].focus(); v[v.length - 1].select();
+	};
+	const undo = box.querySelector("[data-undo]");
+	if (undo) undo.onclick = async () => { await loadTrait(id, true); drawTrait(box, id); page.changed(); };
+	box.querySelector("[data-save]").onclick = async () => {
+		for (const r of rows) {
+			if (!r.key && !r.value) continue;
+			if (!/^[a-z][a-z0-9_]*$/.test(r.key)) { Studio.toast(`Geçersiz modifier adı: ${r.key || "(boş)"}`, true); return; }
+			if (!/^-?\d+(\.\d+)?$/.test(r.value) && !r.value.startsWith("@")) { Studio.toast(`${r.key}: bir sayı yaz (ör. -0.25).`, true); return; }
+		}
+		try {
+			const result = await Studio.api("/api/trait/save", { id, file: D.file, version: D.version, modifiers: rows.filter((r) => r.key || r.value) });
+			result.modifiers.forEach((m) => (modLabels[m.key] = m.label));
+			traitEdits[id] = { detail: result, rows: result.modifiers.map((m) => ({ key: m.key, value: m.value })), dirty: false };
+			/* other traits of the same file keep their edits; only the file version moves on */
+			Object.values(traitEdits).forEach((o) => { if (o.detail && o.detail.file === result.file) o.detail.version = result.version; });
+			Studio.toast(result.written.length ? `Kaydedildi: ${result.file}${result.copiedFromGame ? " (oyundan moda kopyalandı)" : ""}` : "Değişiklik yok.");
+			drawTrait(box, id); page.changed();
+		} catch (e) { Studio.toast("Kaydedilemedi: " + e.message, true, 8000); }
+	};
+}
+
+/* ---------------- new character ---------------- */
+const NEW_ROLES = ["country_leader", "advisor", "corps_commander", "field_marshal", "navy_leader"];
+const slugOf = (name) => name.replace(/ı/g, "i").replace(/İ/g, "I").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+let ncDone = null;
+function openNewCharacter(pg) {
+	const first = (pg.list.items.find((r) => r.tag) || {}).tag || "";
+	const N = { tag: first, name: "", id: "", idTouched: false, role: "country_leader", ideology: "", slot: "political_advisor", traits: [], cost: "150" };
+	const types = ideologies.flatMap((g) => g.types.map((t) => ({ t, g: g.group })));
+	N.ideology = types.some((x) => x.t === "despotism") ? "despotism" : (types[0] || {}).t || "";
+	const body = document.getElementById("ncBody");
+	const autoId = () => { if (!N.idTouched) { N.id = N.name.trim() && N.tag ? `${N.tag}_${slugOf(N.name)}` : ""; const box = document.getElementById("ncId"); if (box) box.value = N.id; } };
+	function draw() {
+		const tags = Object.keys(countries).sort();
+		body.innerHTML = `
+			<div class="small" style="margin-bottom:8px">Yazılacağı dosya: <code>${esc(pg.file)}</code> (üstteki dosya seçicisinden değiştirebilirsin).</div>
+			<div class="row"><div class="field" style="flex:0 0 200px"><label>Ülke</label><input id="ncTag" list="ncTags" value="${esc(N.tag)}" placeholder="TAG"><datalist id="ncTags">${tags.map((t) => `<option value="${esc(t)}">${esc(countries[t])}</option>`).join("")}</datalist></div>
+				<div class="field"><label>İsim (İngilizce)</label><input id="ncName" value="${esc(N.name)}" placeholder="ör. Jamil Mardam Bey"></div></div>
+			<div class="field"><label>Kimlik (id) <span class="small">isimden otomatik oluşur</span></label><input id="ncId" value="${esc(N.id)}"></div>
+			<div class="field"><label>Rol</label><div class="tabs">${NEW_ROLES.map((r) => `<button data-role="${r}" class="${N.role === r ? "on" : ""}">${esc(ROLE_LABELS[r])}</button>`).join("")}</div></div>
+			${N.role === "country_leader" ? `<div class="field"><label>Alt ideoloji</label><select id="ncIdeo">${ideologies.map((g) => `<optgroup label="${esc(g.group)}">${g.types.map((t) => `<option ${t === N.ideology ? "selected" : ""}>${esc(t)}</option>`).join("")}</optgroup>`).join("")}</select></div>` : ""}
+			${N.role === "advisor" ? `<div class="field"><label>Görev</label><div class="slotPick">${Studio.ADVISOR_SLOTS.map((s) => `<button data-slot="${s.id}" class="${N.slot === s.id ? "on" : ""}" title="${esc(s.help)}"><b>${esc(s.label)}</b><span>${esc(s.help)}</span></button>`).join("")}</div></div>
+				<div class="field"><label>Özellikler</label><div id="ncTraits"></div></div>
+				<div class="field" style="max-width:160px"><label>Maliyet (siyasi güç)</label><input id="ncCost" type="number" min="1" value="${esc(N.cost)}"></div>
+				<div class="small">Bu kişi henüz bir ülkeye işe alınmaz. Ülke sayfasındaki <b>＋ Danışman ekle</b> bunu tek adımda yapar.</div>` : ""}
+			<div class="row" style="margin-top:10px"><span class="spacer"></span><button class="primary fixed" id="ncGo">Oluştur</button></div>`;
+		const $ = (id) => document.getElementById(id);
+		$("ncTag").addEventListener("input", () => { N.tag = $("ncTag").value.trim().toUpperCase(); autoId(); });
+		$("ncName").addEventListener("input", () => { N.name = $("ncName").value; autoId(); });
+		$("ncId").addEventListener("input", () => { N.id = $("ncId").value.trim(); N.idTouched = !!N.id; });
+		body.querySelectorAll("[data-role]").forEach((b) => (b.onclick = () => { N.role = b.dataset.role; draw(); }));
+		if ($("ncIdeo")) $("ncIdeo").onchange = () => (N.ideology = $("ncIdeo").value);
+		if (N.role === "advisor") {
+			const chooser = Studio.traitChooser($("ncTraits"), { slot: N.slot, selected: N.traits, tag: N.tag, onChange: (list) => (N.traits = list) });
+			body.querySelectorAll("[data-slot]").forEach((b) => (b.onclick = () => {
+				N.slot = b.dataset.slot; body.querySelectorAll("[data-slot]").forEach((x) => x.classList.toggle("on", x === b)); chooser.setSlot(N.slot);
+			}));
+			$("ncCost").addEventListener("input", () => (N.cost = $("ncCost").value));
+		}
+		$("ncGo").onclick = () => {
+			if (!/^[A-Z][A-Z0-9]{2}$/.test(N.tag)) { Studio.toast("Ülke etiketini yaz (ör. SYR).", true); return; }
+			if (!N.name.trim()) { Studio.toast("İngilizce ismi yaz.", true); return; }
+			if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(N.id)) { Studio.toast("Kimlik harfle başlamalı; yalnızca harf, rakam ve _ içerebilir.", true); return; }
+			if (pg.list.items.some((r) => r.id === N.id)) { Studio.toast("Bu dosyada bu kimlikle bir karakter zaten var.", true); return; }
+			const meta = { role: N.role, tag: N.tag };
+			if (N.role === "country_leader") meta.ideology = N.ideology;
+			if (N.role === "advisor") {
+				if (!N.traits.length) { Studio.toast("En az bir özellik seç.", true); return; }
+				Object.assign(meta, { slot: N.slot, traits: N.traits, cost: parseInt(N.cost, 10) || 150 });
+			}
+			closeNew({ id: N.id, name: N.name.trim(), meta });
+		};
+	}
+	draw();
+	document.getElementById("ncModal").style.display = "flex";
+	document.getElementById("ncName").focus();
+	return new Promise((resolve) => (ncDone = resolve));
+}
+function closeNew(value) { document.getElementById("ncModal").style.display = "none"; if (ncDone) { ncDone(value); ncDone = null; } }
+document.getElementById("ncClose").onclick = () => closeNew(null);
+document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && document.getElementById("ncModal").style.display === "flex" && document.getElementById("iconModal").style.display !== "flex") closeNew(null); });
+Studio.advisorTraits().then((t) => { traitData = t; if (page.item) page.changed(true); }).catch(() => {});
+
+page.init();
+</script>
+</body>
+</html>

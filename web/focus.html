@@ -1,0 +1,761 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="studio-token" content="__EDITOR_TOKEN__">
+<title>Odak Ağaçları · HOI4 Türkçe Mod Toolu</title>
+<link rel="stylesheet" href="/static/studio.css">
+<style>
+#app { display: grid; grid-template-rows: 1fr auto; grid-template-columns: 1fr var(--panelW, 500px); min-height: 0; }
+#canvasWrap { position: relative; overflow: hidden; background: radial-gradient(circle at 50% 30%, #262a31, #17191d); min-height: 0; }
+svg#cv { width: 100%; height: 100%; display: block; cursor: grab; user-select: none; }
+svg#cv.panning { cursor: grabbing; }
+svg#cv.linking { cursor: crosshair; }
+.node .box { fill: #2f333b; stroke: #6b6458; stroke-width: 1.2; rx: 6; }
+.node .plate { fill: #4a4130; stroke: #8a7650; stroke-width: 1; rx: 3; }
+.node text { fill: #f3ead6; font-size: 10.5px; pointer-events: none; }
+.node.sel .box { stroke: var(--sel); stroke-width: 3; }
+.node.primary .box { stroke: #fff; stroke-width: 3; }
+.node.changed .plate { fill: #5b4a22; }
+.node.added .plate { fill: #2f5a37; }
+.node.problem .box { stroke: var(--bad); stroke-width: 2.5; }
+.node.ghost { opacity: .55; }
+.node.claude .box { stroke: #c08cff; stroke-width: 3; }
+.node .badge { fill: var(--or); font-size: 10px; }
+.node .mark { fill: #c08cff; font-size: 12px; }
+.edge { fill: none; stroke: #c9c3b6; stroke-width: 2; }
+.edge.or { stroke: var(--or); stroke-dasharray: 6 4; }
+.edge.hl { stroke: var(--sel); stroke-width: 3; }
+.mex { stroke: var(--bad); stroke-width: 2; stroke-dasharray: 3 3; fill: none; }
+aside { grid-row: 1 / 3; grid-column: 2; background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; padding: 10px 12px; }
+.pgroup { border: 1px dashed var(--line); border-radius: 6px; padding: 6px; margin-bottom: 6px; }
+.chip b { font-weight: normal; }
+.chip button { padding: 0 5px; border: none; background: transparent; color: var(--muted); }
+.chip button:hover { color: var(--bad); }
+footer { grid-column: 1; background: var(--panel); border-top: 1px solid var(--line); max-height: 26vh; overflow-y: auto; }
+footer summary { padding: 6px 10px; cursor: pointer; color: var(--muted); }
+footer ul { margin: 0; padding: 0 10px 8px 28px; }
+footer li { cursor: pointer; padding: 1px 0; }
+footer li:hover { color: var(--sel); }
+#modeBar { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); background: #1d3a57; border: 1px solid var(--sel); padding: 5px 12px; border-radius: 6px; display: none; }
+#syncBanner { position: absolute; top: 8px; right: 8px; background: #33284a; border: 1px solid #8a6bc4; padding: 8px 10px; border-radius: 6px; display: none; max-width: 440px; }
+#help { position: absolute; bottom: 8px; left: 10px; color: var(--muted); font-size: 11.5px; pointer-events: none; }
+</style>
+</head>
+<body>
+<div class="toolbar">
+	<b style="color:var(--gold)">Odak Ağaçları</b><span class="sep"></span>
+	<select id="fileSel" title="Odak dosyası" style="max-width:300px"></select>
+	<select id="treeSel" title="Ağaç"></select>
+	<label class="small"><input type="checkbox" id="vanillaChk"> oyunun dosyaları</label>
+	<button id="reloadBtn" title="Dosyayı diskten yeniden yükle">Yeniden yükle</button>
+	<span class="sep"></span>
+	<button id="undoBtn" title="Geri al (Ctrl+Z)">↶ Geri al</button>
+	<button id="redoBtn" title="İleri al (Ctrl+Y)">↷ İleri al</button>
+	<button id="addBtn" title="Yeni odak ekle (seçili odağın altına)">＋ Yeni odak</button>
+	<span class="sep"></span>
+	<input id="searchBox" placeholder="Bu ağaçta ara…" style="width:170px">
+	<button id="fitBtn" title="Tüm ağacı göster (F)">Sığdır</button>
+	<span class="spacer"></span>
+	<span id="changeCount" class="small"></span>
+	<button id="saveBtn" class="primary" title="Kaydet (Ctrl+S)">Kaydet</button>
+</div>
+<div id="app">
+	<div id="canvasWrap">
+		<svg id="cv"><g id="vp"><g id="edges"></g><g id="mexes"></g><g id="nodes"></g></g></svg>
+		<div id="modeBar"></div>
+		<div id="syncBanner"></div>
+		<div id="help">Sürükle: taşı · <kbd>Shift</kbd>+tık: çoklu seçim · boş alanı sürükle: kaydır · tekerlek: yakınlaştır · <kbd>Del</kbd>: sil · <kbd>Esc</kbd>: iptal</div>
+	</div>
+	<aside id="panel"></aside>
+	<footer><details id="probBox" open><summary id="probSum">Sorunlar</summary><ul id="probList"></ul></details></footer>
+</div>
+<script src="/static/studio.js"></script>
+<script src="/static/studio-schema.js"></script>
+<script src="/static/studio-script.js"></script>
+<script>
+"use strict";
+Studio.initNav("focus");
+const $ = Studio.$, esc = Studio.esc, clone = Studio.clone, toast = Studio.toast, api = Studio.api, iconUrl = Studio.iconUrl;
+const GX = 120, GY = 140, NW = 104, NH = 98;
+const PANEL_WIDTHS = { normal: "500px", wide: "780px" };
+const TABS = [["general", "Genel"], ["reward", "Ödül"], ["conditions", "Koşullar"], ["advanced", "Gelişmiş"]];
+/* the script blocks of a focus that the builder edits (mod_focus.SCRIPT_BLOCKS); an empty trigger block is
+ * removed instead of written, because the game reads `bypass = { }` as "always true" */
+const KEEP_EMPTY = new Set(["completion_reward"]);
+const REWARD_BLOCKS = [
+	{ key: "completion_reward", label: "Odak tamamlanınca", mode: "effect", desc: "Odağın ödülü: buraya eklediğin her etki odak bitince çalışır ve ipucunda görünür." },
+	{ key: "select_effect", label: "Odak seçilince", mode: "effect", optional: true, desc: "Odak başlatıldığı anda çalışır (bitmesi beklenmez)." },
+	{ key: "complete_tooltip", label: "İpucunda farklı göster", mode: "effect", optional: true, desc: "Yazılırsa ödül ipucunda gerçek etkiler yerine bunlar gösterilir." },
+];
+const CONDITION_BLOCKS = [
+	{ key: "available", label: "Alınabilmesi için", mode: "trigger", desc: "Bu koşullar doğru değilse odak seçilemez (önkoşul odaklarına ek olarak)." },
+	{ key: "bypass", label: "Kendiliğinden geçilir", mode: "trigger", desc: "Bu koşullar doğruysa odak yapılmadan tamamlanmış sayılır; ödülü verilmez." },
+	{ key: "allow_branch", label: "Dalın görünmesi için", mode: "trigger", desc: "Doğru değilse bu odak ve altındaki dal ağaçta hiç görünmez (gizli yollar)." },
+	{ key: "cancel", label: "İptal koşulu", mode: "trigger", desc: "Odak sürerken bu koşullar doğru olursa odak iptal edilir." },
+];
+/* yes/no switches of a focus with the value the game uses when the line is missing (wiki: national focus modding) */
+const FLAGS = [
+	["cancel_if_invalid", "Koşulları bozulursa iptal olsun", "Sürerken alınabilirlik koşulu bozulursa odak iptal edilir.", "yes"],
+	["continue_if_invalid", "Koşulları bozulsa da sürsün", "Seçildikten sonra koşul bozulsa bile odak tamamlanır.", "no"],
+	["available_if_capitulated", "Teslim olunmuşken de alınabilir", "Ülke teslim olduktan sonra da seçilebilir.", "no"],
+	["cancelable", "Oyuncu yarıda bırakabilir", "Kapalıysa odak başladıktan sonra değiştirilemez.", "yes"],
+	["bypass_if_unavailable", "Alınamıyorsa geçilmiş say", "Alınabilirlik koşulu sağlanmıyorsa odak geçilmiş sayılır.", "no"],
+];
+const S = {
+	file: "", tree: "", trees: [], version: "", locStamp: "", vanilla: false, isVanillaFile: false,
+	focuses: new Map(), orig: new Map(), added: new Set(), deleted: new Set(),
+	sel: new Set(), primary: null, undo: [], redo: [], mode: null,
+	view: { x: 40, y: 40, k: 0.8 }, drag: null, pan: null, problems: new Map(), marks: new Set(), syncing: false, offsetX: 0,
+	tab: "general", locBase: {}, locEdit: {},
+};
+/* tooltip texts written inside the builder: `locBase` is what the mod has, `locEdit` what the user typed */
+const LOC = {
+	get: (key) => (key in S.locEdit ? S.locEdit[key] : S.locBase[key]),
+	set: (key, text) => { S.locEdit[key] = text; updateCount(); },
+	seed: (key, text) => { if (!(key in S.locBase)) S.locBase[key] = text; },
+};
+const locChanges = () => Object.fromEntries(Object.entries(S.locEdit).filter(([k, v]) => v !== (S.locBase[k] ?? "")));
+function setPanelWidth(wide) {
+	document.documentElement.style.setProperty("--panelW", wide ? PANEL_WIDTHS.wide : PANEL_WIDTHS.normal);
+	try { localStorage.setItem("studio.focus.wide", wide ? "1" : "0"); } catch (e) { /* private mode */ }
+}
+const panelIsWide = () => { try { return localStorage.getItem("studio.focus.wide") === "1"; } catch (e) { return false; } };
+setPanelWidth(panelIsWide());
+
+/* ---------- loading ---------- */
+function comparable(f) { return { x: f.x, y: f.y, rel: f.rel, cost: f.cost, icon: f.icon, prereq: f.prereq, mex: f.mex, name: f.name, desc: f.desc, blocks: f.blocks, flags: f.flags, filters: f.filters }; }
+function adopt(data) {
+	S.file = data.file; S.tree = data.tree; S.trees = data.trees; S.version = data.version; S.locStamp = data.locStamp || ""; S.isVanillaFile = !!data.vanilla;
+	S.focuses = new Map(); S.orig = new Map(); S.added = new Set(); S.deleted = new Set(); S.locBase = {}; S.locEdit = {};
+	for (const f of data.focuses) { f.rawDirty = false; S.focuses.set(f.id, f); S.orig.set(f.id, clone(comparable(f))); }
+	S.sel = new Set(); S.primary = null; S.undo = []; S.redo = [];
+	$("treeSel").innerHTML = S.trees.map((t) => `<option ${t === S.tree ? "selected" : ""}>${esc(t)}</option>`).join("");
+	$("treeSel").style.display = S.trees.length > 1 ? "" : "none";
+	Studio.known(S.file, S.version, S.locStamp);
+	const params = new URLSearchParams(location.search);
+	params.set("file", S.file); params.set("tree", S.tree); params.delete("launch");
+	history.replaceState(null, "", "/focus.html?" + params.toString());
+}
+async function loadFiles() {
+	const { files } = await api(`/api/files?module=focus&vanilla=${S.vanilla ? 1 : 0}`);
+	$("fileSel").innerHTML = files.map((f) => `<option value="${esc(f.file)}">${esc(f.file.split("/").pop())}${f.vanilla ? " (oyun)" : ""}</option>`).join("");
+	if (S.file) $("fileSel").value = S.file;
+	return files;
+}
+async function load(file, tree = "", fit = true) {
+	if (hasChanges() && !confirm("Kaydedilmemiş değişiklikler kaybolacak. Devam edilsin mi?")) { $("fileSel").value = S.file; return; }
+	try {
+		adopt(await api(`/api/focus/tree?file=${encodeURIComponent(file)}&tree=${encodeURIComponent(tree)}`));
+		$("fileSel").value = S.file; S.marks = new Set(); hideBanner();
+		localStorage.setItem("studio.focus.file", S.file);
+		render(); if (fit) fitView(); renderPanel();
+	} catch (e) { toast("Yüklenemedi: " + e.message, true, 8000); }
+}
+async function init() {
+	const params = new URLSearchParams(location.search);
+	S.vanilla = localStorage.getItem("studio.focus.vanilla") === "1";
+	$("vanillaChk").checked = S.vanilla;
+	let files = await loadFiles();
+	let file = params.get("file") || localStorage.getItem("studio.focus.file") || "common/national_focus/SYR.txt";
+	if (!file.includes("/")) file = "common/national_focus/" + file;
+	if (!files.some((f) => f.file === file) && params.get("file")) { S.vanilla = true; $("vanillaChk").checked = true; files = await loadFiles(); }
+	if (!files.some((f) => f.file === file)) file = (files[0] || {}).file;
+	if (!file) return;
+	await load(file, params.get("tree") || "");
+	const focus = params.get("focus");
+	let target = focus && S.focuses.has(focus) ? focus : null;
+	if (!target && params.get("line")) {
+		const line = +params.get("line");
+		const above = [...S.focuses.values()].filter((f) => f.line <= line).sort((a, b) => b.line - a.line)[0];
+		if (above) target = above.id;
+	}
+	if (TABS.some(([id]) => id === params.get("tab"))) S.tab = params.get("tab");
+	if (target) { S.sel = new Set([target]); S.primary = target; render(); centerOn(target); renderPanel(); }
+}
+
+/* ---------- positions ---------- */
+function absPos(id, seen = new Set()) {
+	const f = S.focuses.get(id);
+	if (!f) return { x: 0, y: 0 };
+	let x = f.x, y = f.y;
+	if (S.drag && S.drag.moving.has(id)) { x += S.drag.dx; y += S.drag.dy; }
+	if (f.rel && S.focuses.has(f.rel) && !seen.has(f.rel)) { seen.add(id); const p = absPos(f.rel, seen); x += p.x; y += p.y; }
+	return { x, y };
+}
+function relAncestors(id) {
+	const out = new Set(); let f = S.focuses.get(id);
+	while (f && f.rel && S.focuses.has(f.rel) && !out.has(f.rel)) { out.add(f.rel); f = S.focuses.get(f.rel); }
+	return out;
+}
+function movableRoots(ids) { return new Set([...ids].filter((id) => ![...relAncestors(id)].some((a) => ids.has(a)))); }
+
+/* ---------- undo ---------- */
+function snapshot() { return JSON.stringify({ f: [...S.focuses.values()], a: [...S.added], d: [...S.deleted] }); }
+function restore(snap) {
+	const o = JSON.parse(snap);
+	S.focuses = new Map(o.f.map((f) => [f.id, f])); S.added = new Set(o.a); S.deleted = new Set(o.d);
+	S.sel = new Set([...S.sel].filter((id) => S.focuses.has(id)));
+	if (!S.focuses.has(S.primary)) S.primary = null;
+}
+function pushUndo() { S.undo.push(snapshot()); if (S.undo.length > 200) S.undo.shift(); S.redo = []; }
+function undo() { if (!S.undo.length) return; S.redo.push(snapshot()); restore(S.undo.pop()); render(); renderPanel(); }
+function redo() { if (!S.redo.length) return; S.undo.push(snapshot()); restore(S.redo.pop()); render(); renderPanel(); }
+
+/* ---------- change tracking ---------- */
+function same(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+function focusChanges(f) {
+	const o = S.orig.get(f.id); if (!o) return null;
+	const c = {};
+	for (const k of ["x", "y", "cost", "icon", "prereq", "mex"]) if (!same(f[k], o[k])) c[k] = f[k];
+	if (!same(f.rel, o.rel)) c.rel = f.rel;
+	/* script blocks and switches: only the changed ones, null for a removed one */
+	for (const part of ["blocks", "flags"]) {
+		const diff = {};
+		for (const k of new Set([...Object.keys(o[part] || {}), ...Object.keys(f[part] || {})])) if ((f[part] || {})[k] !== (o[part] || {})[k]) diff[k] = k in (f[part] || {}) ? f[part][k] : null;
+		if (Object.keys(diff).length) c[part] = diff;
+	}
+	if (!same(f.filters || [], o.filters || [])) c.filters = f.filters || [];
+	return c;
+}
+function buildPayload() {
+	const changed = [], added = [], loc = locChanges();
+	for (const f of S.focuses.values()) {
+		if (S.added.has(f.id)) {
+			added.push({ id: f.id, x: f.x, y: f.y, cost: f.cost || "10", icon: f.icon || "GFX_goal_unknown", prereq: f.prereq, mex: f.mex, copyOf: f.copyOf || null,
+				blocks: f.blocks || {}, flags: f.flags || {}, ...(f.filters ? { filters: f.filters } : {}) });
+			if (f.name) loc[f.id] = f.name;
+			if (f.desc) loc[f.id + "_desc"] = f.desc;
+			continue;
+		}
+		const o = S.orig.get(f.id);
+		if (f.rawDirty) changed.push({ id: f.id, raw: f.raw });
+		else { const c = focusChanges(f); if (c && Object.keys(c).length) changed.push({ id: f.id, ...c }); }
+		if (f.name !== o.name) loc[f.id] = f.name;
+		if (f.desc !== o.desc) loc[f.id + "_desc"] = f.desc;
+	}
+	const deleted = [...S.deleted].filter((id) => S.orig.has(id));
+	return { file: S.file, tree: S.tree, version: S.version, changed, added, deleted, loc };
+}
+function isChanged(f) {
+	if (S.added.has(f.id) || f.rawDirty) return true;
+	const c = focusChanges(f), o = S.orig.get(f.id);
+	return (c && Object.keys(c).length > 0) || f.name !== o.name || f.desc !== o.desc;
+}
+function hasChanges() {
+	if (!S.file) return false;
+	if (S.deleted.size || S.added.size || Object.keys(locChanges()).length) return true;
+	for (const f of S.focuses.values()) if (isChanged(f)) return true;
+	return false;
+}
+async function save() {
+	const p = buildPayload();
+	if (!p.changed.length && !p.added.length && !p.deleted.length && !Object.keys(p.loc).length) { toast("Kaydedilecek değişiklik yok."); return true; }
+	const bad = [...S.problems.values()].flat().filter((x) => x.level === "error");
+	if (bad.length && !confirm(`${bad.length} hata var (ör. çakışan konum, bilinmeyen önkoşul). Yine de kaydedilsin mi?`)) return false;
+	const busy = (Studio.claude.requests || []).some((r) => r.status === "working" && r.file === S.file);
+	if (busy && !confirm("Claude şu an bu dosya üzerinde çalışıyor. Şimdi kaydetmek onun değişiklikleriyle çakışabilir. Yine de kaydedilsin mi?")) return false;
+	try {
+		const data = await api("/api/focus/save", p);
+		const keepView = { ...S.view }, prim = S.primary, marks = S.marks;
+		adopt(data);
+		S.view = keepView; S.marks = new Set([...marks].filter((id) => S.focuses.has(id)));
+		if (S.focuses.has(prim)) { S.primary = prim; S.sel = new Set([prim]); }
+		render(); renderPanel();
+		toast("Kaydedildi: " + data.written.join(", ") + (data.backup ? `\nYedek: ${data.backup}` : "") + (data.copiedFromGame ? "\nOyunun dosyası moda kopyalandı." : ""), false, 6000);
+		if (data.copiedFromGame) await loadFiles();
+		return true;
+	} catch (e) { toast("Kaydedilemedi: " + e.message, true, 10000); return false; }
+}
+
+/* ---------- problems ---------- */
+function computeProblems() {
+	const probs = new Map(); const add = (id, level, msg) => { if (!probs.has(id)) probs.set(id, []); probs.get(id).push({ level, msg }); };
+	const pos = new Map();
+	for (const f of S.focuses.values()) {
+		const p = absPos(f.id); const key = p.x + "," + p.y;
+		if (pos.has(key)) { add(f.id, "error", `${pos.get(key)} ile aynı konumda (${key})`); add(pos.get(key), "error", `${f.id} ile aynı konumda (${key})`); }
+		else pos.set(key, f.id);
+		if (f.rel && !S.focuses.has(f.rel)) add(f.id, "error", `relative_position_id bilinmeyen odağı gösteriyor: ${f.rel}`);
+		for (const g of f.prereq) for (const pid of g) {
+			if (!S.focuses.has(pid)) add(f.id, "error", `bilinmeyen önkoşul: ${pid}`);
+			else if (absPos(pid).y >= p.y) add(f.id, "warn", `önkoşul ${pid} bu odağın üstünde değil`);
+		}
+		for (const m of f.mex) {
+			if (!S.focuses.has(m)) add(f.id, "error", `bilinmeyen karşılıklı dışlama: ${m}`);
+			else if (!S.focuses.get(m).mex.includes(f.id)) add(f.id, "warn", `${m} ile dışlama tek taraflı`);
+		}
+		if (!f.name) add(f.id, "warn", "İngilizce isim yok");
+		if (f.icon && f.iconShine === false) add(f.id, "warn", "ikon bir odak ikonu değil (parlama eşi _shine yok, kutuda küçük görünür); GFX_focus_ veya GFX_goal_ ile başlayan bir ikon seç");
+	}
+	S.problems = probs;
+}
+function renderProblems() {
+	const items = [];
+	for (const [id, list] of S.problems) for (const p of list) items.push({ id, ...p });
+	items.sort((a, b) => (a.level === b.level ? 0 : a.level === "error" ? -1 : 1));
+	const errs = items.filter((i) => i.level === "error").length;
+	$("probSum").textContent = items.length ? `Sorunlar: ${errs} hata, ${items.length - errs} uyarı` : "Sorun yok";
+	$("probSum").style.color = errs ? "var(--bad)" : items.length ? "#f0c36a" : "var(--ok)";
+	$("probList").innerHTML = items.map((i) => `<li data-id="${esc(i.id)}" style="color:${i.level === "error" ? "var(--bad)" : "#f0c36a"}">${esc(i.id)}: ${esc(i.msg)}</li>`).join("");
+}
+
+/* ---------- rendering ---------- */
+function applyView() { $("vp").setAttribute("transform", `translate(${S.view.x},${S.view.y}) scale(${S.view.k})`); }
+function wrap(text, n) {
+	const words = String(text).split(/\s+/); const out = []; let cur = "";
+	for (const w of words) { if ((cur + " " + w).trim().length > n && cur) { out.push(cur); cur = w; } else cur = (cur + " " + w).trim(); }
+	if (cur) out.push(cur);
+	if (out.length > 2) out[1] = out[1].slice(0, n - 1) + "…";
+	return out;
+}
+function render() {
+	computeProblems();
+	const pos = new Map();
+	for (const id of S.focuses.keys()) pos.set(id, absPos(id));
+	const minX = Math.min(0, ...[...pos.values()].map((p) => p.x));
+	S.offsetX = minX;
+	const px = (p) => (p.x - minX) * GX, py = (p) => p.y * GY;
+	let edges = "", mex = "", nodes = "";
+	const prim = S.primary;
+	for (const f of S.focuses.values()) {
+		const c = pos.get(f.id); const cx = px(c) + NW / 2, top = py(c);
+		f.prereq.forEach((g) => {
+			for (const pid of g) {
+				if (!pos.has(pid)) continue;
+				const p = pos.get(pid); const pxm = px(p) + NW / 2, pb = py(p) + NH, mid = top - 16;
+				const hl = prim && (prim === f.id || prim === pid) ? " hl" : "";
+				edges += `<path class="edge${g.length > 1 ? " or" : ""}${hl}" d="M${pxm},${pb} V${mid} H${cx} V${top}"/>`;
+			}
+		});
+		for (const m of f.mex) {
+			if (!pos.has(m) || m < f.id) continue;
+			const o = pos.get(m);
+			mex += `<line class="mex" x1="${cx}" y1="${top + 40}" x2="${px(o) + NW / 2}" y2="${py(o) + 40}"/>`;
+		}
+	}
+	for (const f of S.focuses.values()) {
+		const c = pos.get(f.id);
+		const cls = ["node"];
+		if (S.sel.has(f.id)) cls.push("sel");
+		if (prim === f.id) cls.push("primary");
+		if (S.added.has(f.id)) cls.push("added"); else if (isChanged(f)) cls.push("changed");
+		if ((S.problems.get(f.id) || []).some((p) => p.level === "error")) cls.push("problem");
+		if (S.drag && S.drag.moving.has(f.id)) cls.push("ghost");
+		if (S.marks.has(f.id)) cls.push("claude");
+		const lines = wrap(f.name || f.id, 18).slice(0, 2);
+		nodes += `<g class="${cls.join(" ")}" data-id="${esc(f.id)}" transform="translate(${px(c)},${py(c)})">
+			<rect class="box" width="${NW}" height="${NH}"/>
+			${f.icon ? `<image href="${iconUrl(f.icon)}" x="${(NW - 84) / 2}" y="3" width="84" height="66" preserveAspectRatio="xMidYMid meet"/>` : ""}
+			<rect class="plate" x="2" y="${NH - 28}" width="${NW - 4}" height="26"/>
+			${lines.map((l, i) => `<text x="${NW / 2}" y="${NH - 17 + i * 11}" text-anchor="middle">${esc(l)}</text>`).join("")}
+			${f.rel ? `<text class="badge" x="4" y="12">⚓</text>` : ""}
+			${S.marks.has(f.id) ? `<text class="mark" x="4" y="${NH - 34}">✦</text>` : ""}
+			${f.cost ? `<text x="${NW - 4}" y="12" text-anchor="end" style="fill:#bbb;font-size:9.5px">${esc(f.cost)}</text>` : ""}
+		</g>`;
+	}
+	$("edges").innerHTML = edges; $("mexes").innerHTML = mex; $("nodes").innerHTML = nodes;
+	applyView(); renderProblems(); updateCount();
+}
+function updateCount() {
+	const p = buildPayload();
+	const n = p.changed.length + p.added.length + p.deleted.length + Object.keys(p.loc).length;
+	$("changeCount").textContent = n ? `${n} kaydedilmemiş değişiklik` : (S.isVanillaFile ? "Oyunun dosyası (kaydedince moda kopyalanır)" : "Değişiklik yok");
+	$("saveBtn").disabled = !n;
+	$("undoBtn").disabled = !S.undo.length; $("redoBtn").disabled = !S.redo.length;
+}
+function fitView() {
+	const pos = [...S.focuses.keys()].map((id) => absPos(id));
+	if (!pos.length) return;
+	const minX = Math.min(...pos.map((p) => p.x)), maxX = Math.max(...pos.map((p) => p.x)), maxY = Math.max(...pos.map((p) => p.y));
+	const w = (maxX - minX + 1) * GX, h = (maxY + 1) * GY;
+	const r = $("cv").getBoundingClientRect();
+	const k = Math.min(r.width / (w + 80), r.height / (h + 80), 1.2);
+	S.view = { k, x: (r.width - w * k) / 2, y: 30 };
+	applyView();
+}
+function centerOn(id) {
+	const p = absPos(id); const r = $("cv").getBoundingClientRect();
+	S.view.x = r.width / 2 - ((p.x - S.offsetX) * GX + NW / 2) * S.view.k;
+	S.view.y = r.height / 2 - (p.y * GY + NH / 2) * S.view.k;
+	applyView();
+}
+
+/* ---------- canvas interaction ---------- */
+function svgPoint(ev) { const r = $("cv").getBoundingClientRect(); return { x: (ev.clientX - r.left - S.view.x) / S.view.k, y: (ev.clientY - r.top - S.view.y) / S.view.k }; }
+function setMode(mode) {
+	S.mode = mode;
+	const bar = $("modeBar");
+	if (!mode) { bar.style.display = "none"; $("cv").classList.remove("linking"); return; }
+	bar.textContent = { prereqNew: "Yeni önkoşul olacak odağa tıkla (VE). Esc: iptal", prereqOr: "Bu VEYA grubuna eklenecek odağa tıkla. Esc: iptal", mex: "Karşılıklı dışlanacak odağa tıkla. Esc: iptal" }[mode.type];
+	bar.style.display = "block"; $("cv").classList.add("linking");
+}
+function handleLink(targetId) {
+	const f = S.focuses.get(S.primary); const m = S.mode; setMode(null);
+	if (!f || targetId === f.id) return;
+	pushUndo();
+	if (m.type === "prereqNew") f.prereq.push([targetId]);
+	else if (m.type === "prereqOr") { if (!f.prereq[m.group].includes(targetId)) f.prereq[m.group].push(targetId); }
+	else if (m.type === "mex") { const t = S.focuses.get(targetId); if (!f.mex.includes(targetId)) f.mex.push(targetId); if (!t.mex.includes(f.id)) t.mex.push(f.id); }
+	render(); renderPanel();
+}
+$("cv").addEventListener("pointerdown", (ev) => {
+	const node = ev.target.closest(".node"); const pt = svgPoint(ev);
+	if (node) {
+		const id = node.dataset.id;
+		if (S.mode) { handleLink(id); return; }
+		if (ev.shiftKey) { if (S.sel.has(id)) S.sel.delete(id); else S.sel.add(id); S.primary = id; }
+		else if (!S.sel.has(id)) { S.sel = new Set([id]); S.primary = id; }
+		else S.primary = id;
+		S.drag = { start: pt, dx: 0, dy: 0, moving: new Set(S.sel), roots: movableRoots(S.sel), moved: false };
+		$("cv").setPointerCapture(ev.pointerId);
+		render(); renderPanel();
+	} else {
+		if (S.mode) { setMode(null); return; }
+		if (!ev.shiftKey) { S.sel = new Set(); S.primary = null; render(); renderPanel(); }
+		S.pan = { x: ev.clientX, y: ev.clientY, vx: S.view.x, vy: S.view.y };
+		$("cv").classList.add("panning"); $("cv").setPointerCapture(ev.pointerId);
+	}
+});
+$("cv").addEventListener("pointermove", (ev) => {
+	if (S.drag) {
+		const pt = svgPoint(ev);
+		const dx = Math.round((pt.x - S.drag.start.x) / GX), dy = Math.round((pt.y - S.drag.start.y) / GY);
+		if (dx !== S.drag.dx || dy !== S.drag.dy) { S.drag.dx = dx; S.drag.dy = dy; S.drag.moved = true; S.drag.moving = S.drag.roots; render(); }
+	} else if (S.pan) { S.view.x = S.pan.vx + ev.clientX - S.pan.x; S.view.y = S.pan.vy + ev.clientY - S.pan.y; applyView(); }
+});
+$("cv").addEventListener("pointerup", () => {
+	if (S.drag) {
+		const d = S.drag; S.drag = null;
+		if (d.moved && (d.dx || d.dy)) { pushUndo(); for (const id of d.roots) { const f = S.focuses.get(id); f.x += d.dx; f.y += d.dy; } }
+		render(); renderPanel();
+	}
+	if (S.pan) { S.pan = null; $("cv").classList.remove("panning"); }
+});
+$("cv").addEventListener("wheel", (ev) => {
+	ev.preventDefault();
+	const r = $("cv").getBoundingClientRect(); const mx = ev.clientX - r.left, my = ev.clientY - r.top;
+	const k = Math.min(2.5, Math.max(0.12, S.view.k * (ev.deltaY < 0 ? 1.12 : 1 / 1.12)));
+	S.view.x = mx - (mx - S.view.x) * (k / S.view.k); S.view.y = my - (my - S.view.y) * (k / S.view.k); S.view.k = k;
+	applyView();
+}, { passive: false });
+
+/* ---------- panel ---------- */
+function chip(id, onRemove) {
+	const f = S.focuses.get(id);
+	return `<span class="chip" data-goto="${esc(id)}" title="${esc(id)}"><b>${esc(f ? f.name || id : id + " (?)")}</b><button data-rm="${esc(onRemove)}">✕</button></span>`;
+}
+function sendBoxFor(p, ids) {
+	Studio.sendBox(p, {
+		kind: "focus", file: () => S.file, ids: () => ids, names: () => ids.map((id) => (S.focuses.get(id) || {}).name || id),
+		context: () => ({ tree: S.tree }), unsaved: hasChanges, save,
+	});
+}
+/* ---------- script blocks of the selected focus (visual builder) ---------- */
+function setBlock(f, key, text) {
+	if (!text.trim() && !KEEP_EMPTY.has(key)) delete f.blocks[key]; else f.blocks[key] = text;
+	render();
+}
+function builderFor(host, f, key, mode, locked) {
+	return StudioScript.builder(host, { mode, scope: "country", text: f.blocks[key] || "", prefer: prefix(), idBase: f.id, loc: LOC, disabled: locked,
+		onBefore: pushUndo, onChange: (text) => setBlock(f, key, text) });
+}
+function drawBlocks(el, f, defs, locked) {
+	el.innerHTML = defs.map((d, i) => `<div class="sbSection"><div class="t"><b>${esc(d.label)}</b><code>${esc(d.key)}</code></div>
+		<div class="d">${esc(d.desc)}</div><div data-host="${i}"></div></div>`).join("");
+	defs.forEach((d, i) => builderFor(el.querySelector(`[data-host="${i}"]`), f, d.key, d.mode, locked));
+}
+function drawAdvanced(el, f, locked, rawHtml) {
+	el.innerHTML = `
+		<div class="sbSection"><div class="t"><b>Yapay zekâ ağırlığı</b><code>ai_will_do</code></div>
+			<div class="d">Yapay zekânın bu odağı seçme isteği. Temel ağırlık 0 ise hiç seçmez; "şu durumda" satırlarıyla duruma göre artırılır ya da azaltılır.</div><div id="fAi"></div></div>
+		<div class="sbSection"><div class="t"><b>Arama filtreleri</b><code>search_filters</code></div>
+			<div class="d">Odak ağacının üstündeki filtre düğmeleri bu odağı hangi başlıklarda göstersin.</div><div id="fFilters"></div></div>
+		<div class="sbSection"><div class="t"><b>Davranış</b></div><div class="switches">${FLAGS.map(([k, l, help, def]) => `<label title="${k}">
+			<input type="checkbox" data-flag="${k}" ${(f.flags[k] ?? def) === "yes" ? "checked" : ""} ${locked ? "disabled" : ""}> <b style="font-weight:normal">${esc(l)}</b> <span>${esc(help)}</span></label>`).join("")}</div></div>
+		${rawHtml}`;
+	builderFor($("fAi"), f, "ai_will_do", "ai", locked);
+	StudioScript.picks($("fFilters"), { of: "focus_filter", values: f.filters || [], disabled: locked, add: "Filtre ekle", empty: "Filtre yok. ",
+		onChange: (list) => { pushUndo(); f.filters = list.length ? list : null; render(); } });
+	el.querySelectorAll("[data-flag]").forEach((box) => (box.onchange = () => {
+		const [k, , , def] = FLAGS.find((x) => x[0] === box.dataset.flag);
+		const value = box.checked ? "yes" : "no", o = S.orig.get(f.id);
+		pushUndo();
+		/* the game's own default is not written unless the file already says it */
+		if (value === def && !(o && k in (o.flags || {}))) delete f.flags[k]; else f.flags[k] = value;
+		render();
+	}));
+}
+function renderPanel() {
+	const p = $("panel");
+	if (S.sel.size > 1) {
+		p.innerHTML = `<h2>${S.sel.size} odak seçili</h2><p class="small">Seçili odaklardan birini sürükleyerek hepsini birlikte taşıyabilirsin. Shift+tık ile seçime ekle/çıkar.</p>
+		<div class="row"><button id="pSelClear" class="fixed">Seçimi temizle</button><button class="danger fixed" id="pDelMany">Seçilenleri sil</button></div>`;
+		$("pSelClear").onclick = () => { S.sel = new Set(); S.primary = null; render(); renderPanel(); };
+		$("pDelMany").onclick = () => deleteFocuses([...S.sel]);
+		sendBoxFor(p, [...S.sel]);
+		return;
+	}
+	const f = S.focuses.get(S.primary);
+	if (!f) {
+		p.innerHTML = `<h2>${esc(S.tree)}</h2><p class="small">${esc(S.file)} · ${S.focuses.size} odak${S.isVanillaFile ? " · oyunun dosyası" : ""}</p>
+		<p class="small">Bir odağa tıklayarak düzenle. Yeşil isim plakası yeni, sarımsı plaka değişmiş odakları gösterir. ⚓ işareti başka bir odağa göre konumlanan odaktır; çapası taşınınca o da taşınır.</p>
+		<p class="small">Değişiklikler ancak <b>Kaydet</b>'e basınca dosyaya yazılır. Her kayıttan önce yedek alınır: <code>.tmp/mod_studio/backups/</code></p>
+		${S.marks.size ? `<div class="warn">Son değişiklikte ${S.marks.size} odak değişti; mor ✦ ile işaretli. <button class="small" id="clearMarks">İşaretleri temizle</button></div>` : ""}`;
+		const cm = $("clearMarks"); if (cm) cm.onclick = () => { S.marks = new Set(); render(); renderPanel(); };
+		sendBoxFor(p, []);
+		return;
+	}
+	const isNew = S.added.has(f.id), rawLocked = f.rawDirty, dis = rawLocked ? "disabled" : "";
+	const days = /^\d+(\.\d+)?$/.test(String(f.cost)) ? ` (${Math.round(parseFloat(f.cost) * 7)} gün)` : "";
+	const filled = (defs) => defs.some((d) => (f.blocks[d.key] || "").trim());
+	const tabDot = { reward: filled(REWARD_BLOCKS), conditions: filled(CONDITION_BLOCKS) };
+	p.innerHTML = `
+		<div class="row"><h2 style="margin:0">${esc(f.name || f.id)}</h2><button class="small fixed" id="fWide" title="Paneli genişlet ya da daralt">⇔ Geniş</button></div>
+		<div class="small">${esc(f.id)}${f.line ? ` · satır ${f.line}` : ""}${isNew ? " · yeni" : ""}</div>
+		${rawLocked ? `<div class="warn">Ham kod değiştirildi; alanlar kayda kadar kilitli.</div>` : ""}
+		${f.hasOffset ? `<div class="warn">Bu odakta koşullu "offset" var; düzenleyici onu çizmez.</div>` : ""}
+		<div class="ptabs">${TABS.map(([id, label]) => `<button data-tab="${id}" class="${S.tab === id ? "on" : ""}">${label}${tabDot[id] ? `<span class="n">●</span>` : ""}</button>`).join("")}</div>
+		<div id="fTab"></div>`;
+	const general = `
+		<h3>Metin (İngilizce)</h3>
+		<div class="field"><label>İsim</label><input id="fName" value="${esc(f.name)}"></div>
+		<div class="field"><label>Açıklama</label><textarea id="fDesc" rows="4">${esc(f.desc)}</textarea></div>
+		<h3>İkon</h3>
+		<div class="row" style="align-items:flex-start">
+			<div class="iconPreview fixed" id="fIconBox"><img id="fIconImg" src="${iconUrl(f.icon)}" onerror="this.style.opacity=.15"></div>
+			<div><input id="fIcon" value="${esc(f.icon || "")}" ${dis || (f.iconDynamic ? "disabled" : "")} style="width:100%">
+				<button id="fIconPick" style="margin-top:6px" ${dis || (f.iconDynamic ? "disabled" : "")}>İkon seç…</button>
+				${f.iconDynamic ? `<div class="small">Koşullu ikon: ham koddan düzenle.</div>` : ""}</div>
+		</div>
+		<h3>Süre ve konum</h3>
+		<div class="row">
+			<div class="field"><label>Süre (cost)${esc(days)}</label><input id="fCost" value="${esc(f.cost)}" ${dis}></div>
+			<div class="field"><label>X</label><input id="fX" type="number" value="${f.x}" ${dis}></div>
+			<div class="field"><label>Y</label><input id="fY" type="number" value="${f.y}" ${dis}></div>
+		</div>
+		${f.rel ? `<div class="small">Konum <b>${esc(f.rel)}</b> odağına göre. <button class="small" id="fUnrel" ${dis}>Bağımsız konuma çevir</button></div>` : ""}
+		<h3>Önkoşullar</h3>
+		<div class="small" style="margin-bottom:6px">Her kutu ayrı bir koşuldur (hepsi gerekir). Bir kutudaki odaklardan <b>biri</b> yeter (VEYA).</div>
+		${f.prereq.map((g, i) => `<div class="pgroup"><div class="chips">${g.map((id) => chip(id, `p:${i}:${id}`)).join("")}</div>
+			<button class="small" data-or="${i}" style="margin-top:5px" ${dis}>＋ Bu kutuya VEYA ekle</button></div>`).join("") || `<div class="small">Önkoşul yok.</div>`}
+		<button class="small" id="fPreNew" ${dis}>＋ Yeni önkoşul (tıklayarak seç)</button>
+		<h3>Karşılıklı dışlama</h3>
+		<div class="chips">${f.mex.map((id) => chip(id, `m:${id}`)).join("") || `<span class="small">Yok.</span>`}</div>
+		<button class="small" id="fMexNew" style="margin-top:6px" ${dis}>＋ Dışlama ekle (iki yönlü)</button>
+		<h3>Odak işlemleri</h3>
+		<div class="row"><button id="fBranch">Dalı seç</button><button id="fCopy">Kopyala</button><button id="fAddChild">Altına odak ekle</button></div>
+		<div class="row" style="margin-top:6px"><button class="danger" id="fDelete">Sil</button></div>`;
+	const unsavedScript = !isNew && !rawLocked && !!Object.keys(focusChanges(f) || {}).length;
+	const rawHtml = `<details style="margin-top:12px" ${rawLocked ? "open" : ""}><summary>Ham kod (odağın dosyadaki tam hâli)</summary>
+			${isNew ? `<div class="small">Yeni odağın ham kodu kayıttan sonra düzenlenebilir.</div>` : `
+			${unsavedScript ? `<div class="warn">Aşağıdaki kod dosyadaki hâlidir; sekmelerde yaptığın kaydedilmemiş değişiklikleri içermez. Ham kodu uygularsan o değişikliklerin yerine bu kod yazılır.</div>` : ""}
+			<textarea id="fRaw" class="code" rows="18" spellcheck="false">${esc(f.raw)}</textarea>
+			<div class="row" style="margin-top:6px"><button id="fRawApply" class="fixed">Ham kodu uygula</button>${rawLocked ? `<button id="fRawRevert" class="fixed">Ham kodu geri al</button>` : ""}</div>
+			<div class="small">Uygulanınca bu odağın bloğu kayıtta olduğu gibi yazılır. Süslü parantezler dengeli ve id aynı olmalı.</div>`}
+		</details>`;
+	const tabEl = $("fTab");
+	if (S.tab === "reward") drawBlocks(tabEl, f, REWARD_BLOCKS, rawLocked);
+	else if (S.tab === "conditions") drawBlocks(tabEl, f, CONDITION_BLOCKS, rawLocked);
+	else if (S.tab === "advanced") drawAdvanced(tabEl, f, rawLocked, rawHtml);
+	else tabEl.innerHTML = general;
+	p.querySelectorAll("[data-tab]").forEach((b) => (b.onclick = () => { S.tab = b.dataset.tab; renderPanel(); }));
+	$("fWide").onclick = () => setPanelWidth(!panelIsWide());
+	const bindInput = (id, fn) => {
+		const el = $(id); if (!el) return;
+		el.addEventListener("focus", () => (el.dataset.before = snapshot()));
+		el.addEventListener("input", () => { fn(el.value); render(); });
+		el.addEventListener("change", () => { if (el.dataset.before) { S.undo.push(el.dataset.before); S.redo = []; el.dataset.before = ""; updateCount(); } });
+	};
+	bindInput("fName", (v) => (f.name = v));
+	bindInput("fDesc", (v) => (f.desc = v));
+	bindInput("fCost", (v) => (f.cost = v.trim()));
+	bindInput("fIcon", (v) => { f.icon = v.trim(); $("fIconImg").style.opacity = 1; $("fIconImg").src = iconUrl(f.icon); });
+	bindInput("fX", (v) => (f.x = parseInt(v || "0", 10)));
+	bindInput("fY", (v) => (f.y = parseInt(v || "0", 10)));
+	const iconInput = $("fIcon");
+	if (iconInput) iconInput.addEventListener("change", async () => {
+		try {
+			const info = await api("/api/iconinfo?name=" + encodeURIComponent(f.icon || ""));
+			f.iconShine = info.shine;
+			if (!info.exists) toast("Bu isimde bir sprite yok: " + f.icon, true, 6000);
+			else if (!info.shine) toast("Uyarı: bu bir odak ikonu değil (parlama eşi yok).", true, 6000);
+			render();
+		} catch (e) { /* the problem list updates on the next load */ }
+	});
+	p.querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", (ev) => {
+		ev.stopPropagation(); if (rawLocked) return;
+		pushUndo();
+		const [kind, a, b2] = b.dataset.rm.split(":");
+		if (kind === "p") { const i = +a; f.prereq[i] = f.prereq[i].filter((x) => x !== b2); f.prereq = f.prereq.filter((g) => g.length); }
+		else { f.mex = f.mex.filter((x) => x !== a); const t = S.focuses.get(a); if (t) t.mex = t.mex.filter((x) => x !== f.id); }
+		render(); renderPanel();
+	}));
+	p.querySelectorAll("[data-goto]").forEach((c) => c.addEventListener("click", () => {
+		const id = c.dataset.goto; if (!S.focuses.has(id)) return;
+		S.sel = new Set([id]); S.primary = id; centerOn(id); render(); renderPanel();
+	}));
+	p.querySelectorAll("[data-or]").forEach((b) => (b.onclick = () => setMode({ type: "prereqOr", group: +b.dataset.or })));
+	const on = (id, fn) => { const el = $(id); if (el) el.onclick = fn; };
+	on("fPreNew", () => setMode({ type: "prereqNew" }));
+	on("fMexNew", () => setMode({ type: "mex" }));
+	const pick = async () => {
+		const picked = await Studio.pickIcon({ focus: true, query: "focus",
+			gen: { family: "focus", kind: "focus", file: S.file, id: f.id, context: { tree: S.tree } } });
+		if (!picked) return;
+		pushUndo(); f.icon = picked.name; f.iconShine = picked.shine;
+		if (!picked.shine) toast("Uyarı: bu bir odak ikonu değil (parlama eşi yok, kutuda küçük görünür). GFX_focus_ veya GFX_goal_ ile başlayan bir ikon önerilir.", true, 7000);
+		render(); renderPanel();
+	};
+	on("fIconPick", pick);
+	if (!dis && !f.iconDynamic) on("fIconBox", pick);
+	on("fUnrel", () => { pushUndo(); const a = absPos(f.id); f.rel = null; f.x = a.x; f.y = a.y; render(); renderPanel(); });
+	on("fBranch", () => { S.sel = descendants(f.id); render(); renderPanel(); });
+	on("fCopy", () => copyFocus(f.id));
+	on("fAddChild", () => addFocus(f.id));
+	on("fDelete", () => deleteFocuses([f.id]));
+	on("fRawApply", () => { pushUndo(); f.raw = $("fRaw").value; f.rawDirty = true; render(); renderPanel(); });
+	on("fRawRevert", () => { pushUndo(); f.rawDirty = false; render(); renderPanel(); });
+	const raw = $("fRaw"); if (raw) Studio.codeArea(raw);
+	sendBoxFor(p, [f.id]);
+}
+function descendants(id) {
+	const out = new Set([id]); let grew = true;
+	while (grew) {
+		grew = false;
+		for (const f of S.focuses.values()) {
+			if (out.has(f.id)) continue;
+			if (f.prereq.some((g) => g.some((p) => out.has(p))) || (f.rel && out.has(f.rel))) { out.add(f.id); grew = true; }
+		}
+	}
+	return out;
+}
+
+/* ---------- add / copy / delete ---------- */
+function freeSpot(x, y) {
+	const taken = new Set([...S.focuses.keys()].map((id) => { const p = absPos(id); return p.x + "," + p.y; }));
+	for (let r = 0; r < 40; r++) for (const dx of [r, -r]) if (!taken.has(x + dx + "," + y)) return { x: x + dx, y };
+	return { x, y };
+}
+function prefix() { const first = [...S.focuses.keys()][0] || "TAG_"; const m = first.match(/^([A-Za-z0-9]+_)/); return m ? m[1] : ""; }
+const idTaken = (v) => (S.focuses.has(v) ? "Bu kimlikle bir odak zaten var." : "");
+async function addFocus(parentId) {
+	const parent = parentId || S.primary;
+	const under = parent && S.focuses.has(parent) ? S.focuses.get(parent) : null;
+	const answer = await Studio.ask({ title: "Yeni odak", intro: under ? `<b>${Studio.esc(under.name || under.id)}</b> odağının altına eklenir ve ona bağlanır.` : "Ağacın boş bir yerine eklenir.", fields: [
+		{ key: "name", label: "İngilizce adı", placeholder: "ör. Reform the Army" },
+		{ key: "id", type: "id", from: "name", prefix: prefix(), label: "Kimlik (id)", help: "isimden otomatik oluşur, istersen değiştir", check: idTaken },
+	] });
+	if (!answer) return;
+	const id = answer.id;
+	pushUndo();
+	const spot = parent && S.focuses.has(parent) ? freeSpot(absPos(parent).x, absPos(parent).y + 1) : freeSpot(0, 0);
+	S.focuses.set(id, { id, x: spot.x, y: spot.y, rel: null, icon: "GFX_goal_unknown", iconDynamic: false, iconShine: true, cost: "10",
+		prereq: parent && S.focuses.has(parent) ? [[parent]] : [], mex: [], name: answer.name, desc: "", raw: "", rawDirty: false, hasOffset: false, line: 0,
+		blocks: { completion_reward: "", ai_will_do: "base = 1" }, flags: {}, filters: ["FOCUS_FILTER_POLITICAL"] });
+	S.added.add(id); S.sel = new Set([id]); S.primary = id;
+	render(); renderPanel(); centerOn(id);
+}
+async function copyFocus(srcId) {
+	const src = S.focuses.get(srcId);
+	const answer = await Studio.ask({ title: "Odağı kopyala", ok: "Kopyala", intro: `<b>${Studio.esc(src.name || srcId)}</b> odağının ödülü, maliyeti ve ikonuyla bir kopyası oluşturulur.`, fields: [
+		{ key: "name", label: "İngilizce adı", value: (src.name || srcId) + " (kopya)" },
+		{ key: "id", type: "id", label: "Kimlik (id)", value: srcId + "_copy", check: idTaken },
+	] });
+	if (!answer) return;
+	const id = answer.id;
+	pushUndo();
+	const a = absPos(srcId); const spot = freeSpot(a.x + 1, a.y);
+	S.focuses.set(id, { ...clone(src), id, x: spot.x, y: spot.y, rel: null, mex: [], name: answer.name, rawDirty: false, line: 0, copyOf: S.added.has(srcId) ? null : srcId });
+	S.added.add(id); S.sel = new Set([id]); S.primary = id;
+	render(); renderPanel(); centerOn(id);
+}
+function deleteFocuses(ids) {
+	if (!confirm(`${ids.length} odak silinsin mi? Diğer odaklardaki önkoşul ve dışlama bağlantıları da kaldırılır.`)) return;
+	pushUndo();
+	const gone = new Set(ids);
+	for (const id of ids) for (const f of S.focuses.values()) if (f.rel === id) { const a = absPos(f.id); f.rel = null; f.x = a.x; f.y = a.y; }
+	for (const id of ids) { S.focuses.delete(id); if (S.added.has(id)) S.added.delete(id); else S.deleted.add(id); }
+	for (const f of S.focuses.values()) { f.prereq = f.prereq.map((g) => g.filter((x) => !gone.has(x))).filter((g) => g.length); f.mex = f.mex.filter((x) => !gone.has(x)); }
+	S.sel = new Set(); S.primary = null; render(); renderPanel();
+}
+
+/* ---------- disk changes (Claude or another editor) ---------- */
+function hideBanner() { $("syncBanner").style.display = "none"; }
+function showBanner() {
+	const b = $("syncBanner");
+	if (b.style.display === "block") return;
+	b.innerHTML = `Dosya diskte değişti (büyük ihtimalle Claude). Kaydedilmemiş değişikliklerin var.<div class="row" style="margin-top:6px">
+		<button class="fixed" id="bnReload">Yeniden yükle (değişikliklerim gider)</button><button class="fixed" id="bnLater">Sonra</button></div>`;
+	b.style.display = "block";
+	$("bnReload").onclick = () => syncReload(true);
+	$("bnLater").onclick = hideBanner;
+}
+async function syncReload(force = false) {
+	if (S.syncing) return;
+	S.syncing = true;
+	try {
+		if (force) {
+			for (const id of S.added) S.focuses.delete(id);
+			S.added = new Set(); S.deleted = new Set();
+			for (const f of S.focuses.values()) { const o = S.orig.get(f.id); if (o) Object.assign(f, clone(o)); f.rawDirty = false; }
+		}
+		const before = new Map([...S.focuses.values()].map((f) => [f.id, `${f.raw}\u0000${f.name}\u0000${f.desc}`]));
+		const keepView = { ...S.view }, prim = S.primary, sel = new Set(S.sel);
+		adopt(await api(`/api/focus/tree?file=${encodeURIComponent(S.file)}&tree=${encodeURIComponent(S.tree)}`));
+		S.view = keepView; S.sel = new Set([...sel].filter((id) => S.focuses.has(id))); S.primary = S.focuses.has(prim) ? prim : null;
+		const changed = [...S.focuses.values()].filter((f) => before.get(f.id) !== `${f.raw}\u0000${f.name}\u0000${f.desc}`).map((f) => f.id);
+		const removed = [...before.keys()].filter((id) => !S.focuses.has(id));
+		if (changed.length || removed.length) {
+			S.marks = new Set(changed);
+			toast(`Dosya diskte değişti, ağaç yeniden yüklendi: ${changed.length} odak değişti veya eklendi${removed.length ? `, ${removed.length} odak kaldırıldı` : ""}. Değişenler mor ✦ ile işaretli.`, false, 7000);
+		}
+		hideBanner(); render(); renderPanel();
+	} catch (e) { toast("Yeniden yüklenemedi: " + e.message, true, 8000); }
+	finally { S.syncing = false; }
+}
+Studio.watch(() => [S.file], async () => { if (S.drag || S.syncing) return; if (hasChanges()) showBanner(); else await syncReload(); });
+Studio.unsaved = hasChanges;
+Studio.onSelect = (request, id) => {
+	if (request.file !== S.file) return;
+	const ids = id ? [id] : (request.items || []).map((i) => i.id).filter((x) => S.focuses.has(x));
+	if (!ids.length) return;
+	S.sel = new Set(ids); S.primary = ids[0]; centerOn(ids[0]); render(); renderPanel();
+};
+
+/* ---------- toolbar and keys ---------- */
+$("fileSel").onchange = () => load($("fileSel").value);
+$("treeSel").onchange = () => load(S.file, $("treeSel").value);
+$("vanillaChk").onchange = async () => { S.vanilla = $("vanillaChk").checked; localStorage.setItem("studio.focus.vanilla", S.vanilla ? "1" : "0"); await loadFiles(); };
+$("reloadBtn").onclick = () => load(S.file, S.tree, false);
+$("saveBtn").onclick = save;
+$("undoBtn").onclick = undo; $("redoBtn").onclick = redo;
+$("addBtn").onclick = () => addFocus(S.primary);
+$("fitBtn").onclick = fitView;
+$("searchBox").addEventListener("keydown", (ev) => {
+	if (ev.key !== "Enter") return;
+	const q = ev.target.value.trim().toLowerCase(); if (!q) return;
+	const hit = [...S.focuses.values()].find((f) => f.id.toLowerCase().includes(q) || (f.name || "").toLowerCase().includes(q));
+	if (!hit) { toast("Bulunamadı."); return; }
+	S.sel = new Set([hit.id]); S.primary = hit.id; centerOn(hit.id); render(); renderPanel();
+});
+$("probList").addEventListener("click", (ev) => {
+	const li = ev.target.closest("li"); if (!li || !S.focuses.has(li.dataset.id)) return;
+	S.sel = new Set([li.dataset.id]); S.primary = li.dataset.id; centerOn(li.dataset.id); render(); renderPanel();
+});
+document.addEventListener("keydown", (ev) => {
+	const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName);
+	if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "s") { ev.preventDefault(); save(); return; }
+	if (typing) return;
+	if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "z") { ev.preventDefault(); undo(); }
+	else if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "y") { ev.preventDefault(); redo(); }
+	else if (ev.key === "Escape") { if (S.mode) setMode(null); else { S.sel = new Set(); S.primary = null; render(); renderPanel(); } }
+	else if (ev.key === "Delete" && S.sel.size) deleteFocuses([...S.sel]);
+	else if (ev.key.toLowerCase() === "f") fitView();
+});
+window.addEventListener("resize", applyView);
+init().catch((e) => toast("Başlatılamadı: " + e.message, true, 10000));
+</script>
+</body>
+</html>

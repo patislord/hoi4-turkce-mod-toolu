@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="studio-token" content="__EDITOR_TOKEN__">
+<title>Mod Sağlığı · HOI4 Türkçe Mod Toolu</title>
+<link rel="stylesheet" href="/static/studio.css">
+<style>
+.wrap { padding: 14px 18px; overflow-y: auto; }
+.cols { display: grid; grid-template-columns: 420px 1fr; gap: 18px; }
+.box { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+.file-row { display: flex; gap: 6px; align-items: center; padding: 2px 0; }
+table.find { width: 100%; border-collapse: collapse; }
+table.find td, table.find th { padding: 4px 6px; border-bottom: 1px solid #2c3038; text-align: left; vertical-align: top; }
+table.find th { color: var(--muted); font-weight: normal; font-size: 11.5px; }
+.lv-error { color: var(--bad); } .lv-warning { color: #f0c36a; } .lv-review { color: var(--muted); }
+pre.sum { background: #1f2227; border: 1px solid var(--line); padding: 8px; border-radius: 6px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div class="toolbar"><b style="color:var(--gold)">Mod Sağlığı</b><span class="sep"></span><span class="small">Projenin kontrol aracını (<code>.tools/check.py</code>) çalıştırır ve bulguları ilgili editöre bağlar.</span></div>
+<div class="wrap"><div class="cols">
+	<div>
+		<div class="box">
+			<h2>Hızlı kontrol</h2>
+			<div class="small">Seçtiğin dosyalarda sözdizimi, yerelleştirme, ikon bağlantıları ve kurallar kontrol edilir.</div>
+			<h3>Stüdyoda son kaydedilenler</h3><div id="recent"></div>
+			<h3>Dosya ekle</h3>
+			<div class="row"><input id="addPath" list="pathList" placeholder="ör. common/national_focus/SYR.txt"><button id="addBtn" class="fixed">Ekle</button></div>
+			<datalist id="pathList"></datalist>
+			<h3>Kontrol edilecekler</h3><div id="chosen" class="small">Henüz dosya seçilmedi.</div>
+			<div class="row" style="margin-top:10px"><button class="primary fixed" id="quickBtn">Hızlı kontrolü başlat</button></div>
+		</div>
+		<div class="box" style="margin-top:14px">
+			<h2>Tam kontrol</h2>
+			<div class="small">Tüm modu kontrol eder; birkaç dakika sürebilir. Git kurulu olmadığı için bir test her zaman hata verir (bilinen durum).</div>
+			<div class="row" style="margin-top:10px"><button class="fixed" id="fullBtn">Tam kontrolü başlat</button></div>
+		</div>
+	</div>
+	<div class="box"><h2>Sonuçlar</h2><div id="status" class="small">Henüz kontrol çalıştırılmadı.</div>
+		<div class="row" style="margin:8px 0"><label class="fixed small"><input type="checkbox" id="showReview"> İnceleme (review) maddelerini de göster</label></div>
+		<div id="results"></div></div>
+</div></div>
+<script src="/static/studio.js"></script>
+<script>
+"use strict";
+Studio.initNav("health");
+const esc = Studio.esc, $ = Studio.$;
+const chosen = new Set();
+let last = null, timer = null;
+
+async function loadPaths() {
+	const modules = ["focus", "event", "decision", "category", "idea"];
+	const lists = await Promise.all(modules.map((m) => Studio.api(`/api/files?module=${m}&vanilla=0`).catch(() => ({ files: [] }))));
+	$("pathList").innerHTML = lists.flatMap((l) => l.files.map((f) => `<option value="${esc(f.file)}">`)).join("");
+}
+function drawChosen() {
+	$("chosen").innerHTML = chosen.size ? [...chosen].map((p) => `<div class="file-row"><code>${esc(p)}</code><button class="small" data-rm="${esc(p)}">✕</button></div>`).join("") : "Henüz dosya seçilmedi.";
+	$("chosen").querySelectorAll("[data-rm]").forEach((b) => (b.onclick = () => { chosen.delete(b.dataset.rm); drawChosen(); }));
+}
+function drawRecent(recent) {
+	$("recent").innerHTML = recent.length ? recent.map((p) => `<div class="file-row"><label><input type="checkbox" data-p="${esc(p)}" ${chosen.has(p) ? "checked" : ""}> <code>${esc(p)}</code></label></div>`).join("")
+		: `<div class="small">Bu oturumda stüdyodan kayıt yapılmadı.</div>`;
+	$("recent").querySelectorAll("[data-p]").forEach((c) => (c.onchange = () => { if (c.checked) chosen.add(c.dataset.p); else chosen.delete(c.dataset.p); drawChosen(); }));
+}
+function drawResults(st) {
+	if (st.running) $("status").innerHTML = `<span style="color:#f0c36a">Çalışıyor…</span> (${esc(st.mode === "full" ? "tam" : "hızlı")} kontrol, ${esc(st.started)} saatinde başladı)`;
+	else if (st.finished) $("status").innerHTML = `${esc(st.mode === "full" ? "Tam" : "Hızlı")} kontrol ${esc(st.finished)} saatinde bitti.` + (st.error ? ` <span class="err">${esc(st.error)}</span>` : "");
+	const showReview = $("showReview").checked;
+	const rows = (st.findings || []).filter((f) => showReview || f.level !== "review");
+	const errors = (st.findings || []).filter((f) => f.level === "error").length;
+	const warnings = (st.findings || []).filter((f) => f.level === "warning").length;
+	const reviews = (st.findings || []).filter((f) => f.level === "review").length;
+	$("results").innerHTML = (st.summary ? `<pre class="sum">${esc(st.summary)}</pre>` : "") +
+		(st.finished ? `<div style="margin:6px 0"><b class="lv-error">${errors} hata</b> · <b class="lv-warning">${warnings} uyarı</b> · <span class="lv-review">${reviews} inceleme</span></div>` : "") +
+		(rows.length ? `<table class="find"><tr><th>Seviye</th><th>Yer</th><th>Mesaj</th></tr>${rows.map((f) => `<tr>
+			<td class="lv-${esc(f.level)}">${esc(f.level)}<div class="small">${esc(f.check || "")} ${esc(f.rule || "")}</div></td>
+			<td>${f.url ? `<a href="${esc(f.url)}">${esc(f.path)}:${f.line}</a>` : `${esc(f.path)}:${f.line}`}${f.element ? `<div class="small">${esc(f.element)}</div>` : ""}</td>
+			<td>${esc(f.message)}</td></tr>`).join("")}</table>` : (st.finished ? `<div class="small" style="color:var(--ok)">Gösterilecek bulgu yok.</div>` : ""));
+}
+async function refresh() {
+	try {
+		const st = await Studio.api("/api/health/status");
+		last = st; drawRecent(st.recent || []); drawResults(st);
+		clearTimeout(timer);
+		if (st.running) timer = setTimeout(refresh, 2000);
+	} catch (e) { $("status").textContent = "Durum alınamadı: " + e.message; }
+}
+async function run(mode) {
+	try {
+		await Studio.api("/api/health/run", { mode, paths: [...chosen] });
+		refresh();
+	} catch (e) { Studio.toast(e.message, true, 6000); }
+}
+$("addBtn").onclick = () => { const p = $("addPath").value.trim(); if (p) { chosen.add(p); $("addPath").value = ""; drawChosen(); } };
+$("quickBtn").onclick = () => { if (!chosen.size) { Studio.toast("Önce en az bir dosya seç."); return; } run("quick"); };
+$("fullBtn").onclick = () => { if (confirm("Tam kontrol tüm modu tarar ve birkaç dakika sürebilir. Başlatılsın mı?")) run("full"); };
+$("showReview").onchange = () => last && drawResults(last);
+const params = new URLSearchParams(location.search);
+if (params.get("file")) chosen.add(params.get("file"));
+drawChosen(); loadPaths(); refresh();
+</script>
+</body>
+</html>

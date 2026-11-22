@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="studio-token" content="__EDITOR_TOKEN__">
+<title>Kararlar · HOI4 Türkçe Mod Toolu</title>
+<link rel="stylesheet" href="/static/studio.css">
+<style>
+.cat-head { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+.cat-head img { width: 48px; height: 48px; object-fit: contain; }
+.dec-card { display: flex; gap: 10px; align-items: flex-start; max-width: 600px; }
+.dec-card img { width: 52px; height: 52px; object-fit: contain; flex: 0 0 52px; }
+.dec-meta { display: flex; gap: 12px; margin-top: 6px; color: #d8d2c2; }
+.dec-meta span b { color: #f3d58a; }
+.group.clickable:hover { color: #fff; }
+</style>
+</head>
+<body>
+<div class="toolbar" id="toolbar"></div>
+<div class="page3"><div class="pane list" id="list"></div><div class="pane center" id="center"></div><div class="pane form" id="form"></div></div>
+<script src="/static/studio.js"></script>
+<script src="/static/studio-schema.js"></script>
+<script src="/static/studio-script.js"></script>
+<script>
+"use strict";
+Studio.initNav("decisions");
+/* the scope of a decision's blocks: a state-targeted decision runs them on the state, so no scope check */
+const targetScope = (ed) => (ed.scalar("state_target") === "yes" ? null : "country");
+const esc = Studio.esc;
+let refsCache = { id: null, html: "" };
+
+const DECISION_FIELDS = {
+	scalars: {
+		icon: { label: "İkon", type: "sprite", prefix: "GFX_decision_", pickPrefix: "GFX_decision_", family: "decision" },
+		cost: { label: "Siyasi güç maliyeti", type: "text", help: "sayı veya @sabit" },
+		fire_only_once: { label: "Yalnızca bir kez alınır", type: "bool" },
+		days_remove: { label: "Kaç gün sonra biter", type: "number", help: "süreli kararlar" },
+		days_re_enable: { label: "Tekrar açılma süresi (gün)", type: "number" },
+		days_mission_timeout: { label: "Görev süresi (gün)", type: "number", help: "varsa bu bir görevdir" },
+		is_good: { label: "Görev iyi bir şey mi", type: "bool" },
+		selectable_mission: { label: "Görev seçilebilir", type: "bool" },
+		priority: { label: "Öncelik", type: "number" },
+		custom_cost_text: { label: "Özel maliyet metni", type: "text" },
+		on_map_mode: { label: "Harita modu", type: "text" },
+		state_target: { label: "Eyalet hedefli", type: "bool" },
+	},
+	blocks: {
+		allowed: { label: "Kimler görebilir (allowed)", help: "Oyun başında bir kez kontrol edilir.", script: "trigger" },
+		visible: { label: "Görünürlük (visible)", script: "trigger", scope: targetScope },
+		available: { label: "Alınabilirlik (available)", script: "trigger", scope: targetScope },
+		complete_effect: { label: "Alınınca (complete_effect)", script: "effect", scope: targetScope },
+		remove_effect: { label: "Süre bitince (remove_effect)", script: "effect", scope: targetScope },
+		timeout_effect: { label: "Görev süresi dolunca (timeout_effect)", script: "effect", scope: targetScope },
+		activation: { label: "Görev başlama koşulu (activation)", script: "trigger", scope: targetScope },
+		cancel_trigger: { label: "İptal koşulu (cancel_trigger)", script: "trigger", scope: targetScope },
+		cancel_effect: { label: "İptal olunca (cancel_effect)", script: "effect", scope: targetScope },
+		custom_cost_trigger: { label: "Özel maliyet koşulu", script: "trigger" },
+		modifier: { label: "Etkinken modifier", table: "modifier", add: "Modifier ekle" },
+		targeted_modifier: { label: "Hedefli modifier" },
+		target_trigger: { label: "Hedef koşulu (target_trigger)", help: "FROM hedeftir (ülke ya da eyalet).", script: "trigger", scope: null },
+		target_root_trigger: { label: "Hedef ön koşulu (target_root_trigger)", script: "trigger" },
+		targets: { label: "Hedefler (targets)" },
+		highlight_states: { label: "Vurgulanan eyaletler" },
+		ai_will_do: { label: "Yapay zekâ ağırlığı", script: "ai", scope: targetScope },
+	},
+	locFields: (ed) => [{ key: ed.model.id, label: "İsim" }, { key: ed.model.id + "_desc", label: "Açıklama", multiline: true }],
+};
+const CATEGORY_FIELDS = {
+	scalars: {
+		icon: { label: "İkon", type: "sprite", prefix: "GFX_decision_category_", pickPrefix: "GFX_decision_category_", family: "decision_category_icon" },
+		picture: { label: "Resim", type: "sprite", prefix: "", pickPrefix: "GFX_decision_cat_picture", family: "decision_category_picture" },
+		priority: { label: "Sıralama önceliği", type: "number" },
+		visible_when_empty: { label: "Boşken de görünsün", type: "bool" },
+		scripted_gui: { label: "Scripted GUI", type: "text" },
+	},
+	blocks: {
+		allowed: { label: "Kimler görebilir (allowed)", script: "trigger" },
+		visible: { label: "Görünürlük (visible)", script: "trigger" },
+		available: { label: "Kullanılabilirlik", script: "trigger" },
+		on_map_area: { label: "Harita alanı" },
+	},
+	locFields: (ed) => [{ key: ed.model.id, label: "İsim" }, { key: ed.model.id + "_desc", label: "Açıklama", multiline: true }],
+};
+
+class DecisionPage extends ItemPage {
+	async init() {
+		await super.init();
+		Studio.unsaved = () => !!((this.editor && this.item && this.editor.dirty()) || (this.catEditor && this.catEditor.dirty()));
+		Studio.watch(() => [this.file, this.catModel ? this.catModel.file : null].filter(Boolean), (ch) => this.onDiskChange(ch));
+		const params = new URLSearchParams(location.search);
+		if (params.get("cat")) await this.openCategoryAt(params.get("catfile"), params.get("cat"));
+	}
+	confirmLeave() {
+		const dirty = (this.editor && this.item && this.editor.dirty()) || (this.catEditor && this.catEditor.dirty());
+		return !dirty || confirm("Kaydedilmemiş değişiklikler kaybolacak. Devam edilsin mi?");
+	}
+	showItem(model) { this.catEditor = null; this.catModel = null; super.showItem(model); }
+	renderEmpty() { this.catEditor = null; this.catModel = null; super.renderEmpty(); }
+	category(id) { return ((this.list && this.list.categories) || []).find((c) => c.id === id) || { id, name: id }; }
+	async openCategory(id) {
+		const cat = this.category(id);
+		if (!cat.def) { Studio.toast("Bu kategorinin tanımı common/decisions/categories içinde bulunamadı.", true, 6000); return; }
+		await this.openCategoryAt(cat.def, id);
+	}
+	async openCategoryAt(file, id) {
+		if (!this.confirmLeave()) return;
+		try {
+			const model = await Studio.api(`/api/category/item?file=${encodeURIComponent(file)}&id=${encodeURIComponent(id)}`);
+			this.showCategory(model);
+		} catch (e) { Studio.toast("Kategori açılamadı: " + e.message, true, 8000); }
+	}
+	showCategory(model) {
+		this.id = null; this.item = null; this.editor = null; this.catModel = model;
+		Studio.known(model.file, model.version, model.locStamp);
+		const form = this.$("form");
+		form.innerHTML = `<h2>Kategori: ${esc(model.loc[model.id] || model.id)}</h2><div class="small">${esc(model.id)} · ${esc(model.file)} · satır ${model.line}</div>
+			<div id="catEd"></div><div class="row" style="margin-top:8px"><button class="primary fixed" id="catSave">Kategoriyi kaydet</button></div>`;
+		this.catEditor = new ItemEditor(this.$("catEd"), { ...CATEGORY_FIELDS, kind: "category", onChange: () => this.drawCategory() });
+		this.catEditor.load(model);
+		this.$("catSave").onclick = () => this.saveCategory();
+		Studio.sendBox(form, { kind: "category", file: () => model.file, ids: () => [model.id], names: () => [model.loc[model.id] || model.id],
+			unsaved: () => this.catEditor.dirty(), save: () => this.saveCategory() });
+		this.renderList(); this.updateDirty(); this.drawCategory();
+	}
+	drawCategory() {
+		const ed = this.catEditor, m = this.catModel;
+		if (!ed) return;
+		const icon = ed.scalar("icon");
+		const sprite = icon ? (icon.startsWith("GFX_") ? icon : "GFX_decision_category_" + icon) : "";
+		const picture = ed.scalar("picture");
+		this.$("center").innerHTML = `<h3>Kategori önizlemesi</h3><div class="hoi-card" style="max-width:600px">
+			<div class="cat-head">${sprite ? `<img src="${Studio.iconUrl(sprite)}" onerror="this.style.opacity=.15">` : ""}<div class="hoi-title">${Studio.locHtml(ed.loc[m.id] || m.id)}</div></div>
+			${picture ? `<img src="${Studio.iconUrl(picture)}" style="max-width:100%" onerror="this.style.display='none'">` : ""}
+			<div class="hoi-text">${Studio.locHtml(ed.loc[m.id + "_desc"] || "")}</div></div>
+			<p class="small">Bu kategorideki kararlar soldaki listede bu başlığın altında.</p>`;
+		this.$("pDirty").textContent = ed.dirty() ? "Kategoride kaydedilmemiş değişiklik var" : "Değişiklik yok";
+	}
+	async saveCategory() {
+		if (!this.catEditor || !this.catEditor.dirty()) { Studio.toast("Kaydedilecek değişiklik yok."); return true; }
+		try {
+			const result = await Studio.api("/api/category/save", this.catEditor.payload());
+			this.showCategory(result);
+			await this.loadList();
+			Studio.toast("Kaydedildi: " + (result.written || []).join(", ") + (result.backup ? `\nYedek: ${result.backup}` : ""), false, 6000);
+			return true;
+		} catch (e) { Studio.toast("Kaydedilemedi: " + e.message, true, 10000); return false; }
+	}
+	async newCategory() {
+		if (!this.confirmLeave()) return;
+		const prefix = ((this.list.items[0] || {}).id || "").match(/^([A-Za-z0-9]+_)/);
+		const { files } = await Studio.api("/api/files?module=category&vanilla=0");
+		if (!files.length) { Studio.toast("Modda kategori dosyası (common/decisions/categories) yok.", true, 6000); return; }
+		const used = ((this.list.categories || []).find((c) => c.def && !c.def.includes("00_")) || {}).def || files[0].file;
+		const answer = await Studio.ask({ title: "Yeni karar kategorisi", intro: "Kategori, karar ekranındaki başlıktır; kararlar onun altında listelenir.", fields: [
+			{ key: "name", label: "İngilizce adı", placeholder: "ör. Syrian Unification" },
+			{ key: "id", type: "id", from: "name", prefix: prefix ? prefix[1] : "", label: "Kimlik (id)", help: "isimden otomatik oluşur, istersen değiştir",
+				check: (v) => ((this.list.categories || []).some((c) => c.id === v) ? "Bu kimlikle bir kategori zaten var." : "") },
+			{ key: "file", type: "select", label: "Tanımlanacağı dosya", value: files.some((f) => f.file === used) ? used : files[0].file, options: files.map((f) => [f.file, f.file.split("/").pop()]) },
+		] });
+		if (!answer) return;
+		const { id, name, file: catFile } = answer;
+		try {
+			await Studio.api("/api/category/create", { file: catFile, id, name });
+			await Studio.api("/api/decision/container", { file: this.file, version: this.list.version, category: id });
+			await this.loadList();
+			await this.openCategoryAt(catFile, id);
+			Studio.toast("Kategori oluşturuldu: " + id, false, 5000);
+		} catch (e) { Studio.toast("Kategori oluşturulamadı: " + e.message, true, 10000); }
+	}
+	async onDiskChange(change) {
+		if (this.catModel && change.files.includes(this.catModel.file) && !(this.catEditor && this.catEditor.dirty())) {
+			await this.openCategoryAt(this.catModel.file, this.catModel.id);
+			return;
+		}
+		return super.onDiskChange(change);
+	}
+	updateDirty() {
+		super.updateDirty();
+		if (this.catEditor) this.$("pDel").disabled = true;
+	}
+}
+
+const page = new DecisionPage({
+	kind: "decision",
+	label: "Kararlar",
+	group: (r) => r.category,
+	groupLabel: (g, pg) => pg.category(g).name || g,
+	groupIcon: (g, pg) => pg.category(g).sprite,
+	onGroup: (g, pg) => pg.openCategory(g),
+	extraGroups: (pg) => ((pg.list && pg.list.categories) || []).map((c) => c.id),
+	iconOf: (r) => r.sprite,
+	subOf: (r) => (r.mission ? "görev" : r.cost ? r.cost + " SG" : ""),
+	editor: DECISION_FIELDS,
+	toolbar: (pg, el) => { el.innerHTML = `<button id="pNewCat">＋ Yeni kategori</button>`; el.querySelector("#pNewCat").onclick = () => pg.newCategory(); },
+	renderCenter: async (pg, el) => {
+		const ed = pg.editor, id = pg.id, cat = pg.category(pg.item.meta.category);
+		const icon = ed.scalar("icon");
+		const sprite = icon ? (icon.startsWith("GFX_") ? icon : "GFX_decision_" + icon) : "";
+		const cost = ed.scalar("cost"), days = ed.scalar("days_remove"), mission = ed.scalar("days_mission_timeout");
+		if (refsCache.id !== id) refsCache = { id, html: `<div class="small">Yükleniyor…</div>` };
+		el.innerHTML = `<div class="cat-head">${cat.sprite ? `<img src="${Studio.iconUrl(cat.sprite)}" onerror="this.style.opacity=.15">` : ""}
+				<div><div class="small">Kategori</div><div class="hoi-title">${Studio.locHtml(cat.name || cat.id)}</div></div></div>
+			<h3>Oyundaki görünüm</h3>
+			<div class="hoi-card dec-card">${sprite ? `<img src="${Studio.iconUrl(sprite)}" onerror="this.style.opacity=.15">` : ""}
+				<div style="flex:1"><div class="hoi-title">${Studio.locHtml(ed.loc[id] || id)}</div>
+				<div class="dec-meta">${cost ? `<span>Maliyet: <b>${esc(cost)}</b> siyasi güç</span>` : `<span>Maliyetsiz</span>`}
+					${days ? `<span>Süre: <b>${esc(days)}</b> gün</span>` : ""}${mission ? `<span>Görev: <b>${esc(mission)}</b> gün</span>` : ""}
+					${ed.scalar("fire_only_once") === "yes" ? `<span>Bir kez</span>` : ""}</div>
+				<div class="hoi-text" style="margin-top:6px">${Studio.locHtml(ed.loc[id + "_desc"] || "")}</div></div></div>
+			<div class="small" style="margin-top:6px">${esc(sprite)}</div>
+			<h3>Kullanıldığı yerler</h3><div id="refs">${refsCache.html}</div>`;
+		if (refsCache.html.includes("Yükleniyor")) {
+			const html = await pg.refsHtml(id);
+			refsCache = { id, html };
+			const box = document.getElementById("refs"); if (box && pg.id === id) box.innerHTML = html;
+		}
+	},
+	create: async (pg) => {
+		const cats = (pg.list && pg.list.categories) || [];
+		if (!cats.length) { Studio.toast("Bu dosyada kategori yok. Önce ＋ Yeni kategori ile oluştur.", true, 6000); return null; }
+		const prefix = ((pg.list.items[0] || {}).id || cats[0].id).match(/^([A-Za-z0-9]+_)/);
+		const current = pg.item && cats.some((c) => c.id === pg.item.meta.category) ? pg.item.meta.category : cats[0].id;
+		const answer = await Studio.ask({ title: "Yeni karar", intro: `Yazılacağı dosya: <code>${Studio.esc(pg.file)}</code>`, fields: [
+			{ key: "name", label: "İngilizce adı", placeholder: "ör. Rally the Tribes" },
+			{ key: "id", type: "id", from: "name", prefix: prefix ? prefix[1] : "", label: "Kimlik (id)", help: "isimden otomatik oluşur, istersen değiştir",
+				check: (v) => (pg.list.items.some((r) => r.id === v) ? "Bu dosyada bu kimlikle bir karar zaten var." : "") },
+			{ key: "category", type: "select", label: "Kategori", value: current, options: cats.map((c) => [c.id, c.name && c.name !== c.id ? `${c.name} (${c.id})` : c.id]) },
+		] });
+		if (!answer) return null;
+		return { id: answer.id, name: answer.name, meta: { category: answer.category } };
+	},
+});
+page.init();
+</script>
+</body>
+</html>
