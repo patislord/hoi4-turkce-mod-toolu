@@ -6,7 +6,7 @@ Hearts of Iron IV modları için Türkçe arayüzlü, tarayıcıda çalışan g�
 
 | Uygulama | Neden gerekli | İndirme |
 |---|---|---|
-| **Hearts of Iron IV** | Oyunun kendi dosyaları (ikonlar, metinler, vanilla içerik) buradan okunur. | Steam |
+| **Hearts of Iron IV** | Oyunun kendi dosyaları (ikonlar, metinler, vanilla içerik) buradan okunur. |  |
 | **Python 3** (3.15 ile test edildi) | Tool Python ile çalışır. Kurarken **"Add Python to PATH"** kutusunu işaretle. | https://www.python.org/downloads/ |
 | **HOI4 Mod Setup** | Tool'un kullandığı ortak dosyaları (`.tools/lib`, `.tools/check.py`) modunun içine kurar. | https://github.com/klimPaskov/HOI4-Mod-Setup |
 | **Git** | Bu repoyu indirmek için. (İstersen yerine GitHub'dan ZIP indirebilirsin.) | https://git-scm.com/downloads |
