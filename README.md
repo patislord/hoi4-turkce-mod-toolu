@@ -10,7 +10,6 @@ Hearts of Iron IV modları için Türkçe arayüzlü, tarayıcıda çalışan g�
 | **Python 3** (3.15 ile test edildi) | Tool Python ile çalışır. Kurarken **"Add Python to PATH"** kutusunu işaretle. | https://www.python.org/downloads/ |
 | **HOI4 Mod Setup** | Tool'un kullandığı ortak dosyaları (`.tools/lib`, `.tools/check.py`) modunun içine kurar. | https://github.com/klimPaskov/HOI4-Mod-Setup |
 | **Git** | Bu repoyu indirmek için. (İstersen yerine GitHub'dan ZIP indirebilirsin.) | https://git-scm.com/downloads |
-| **Bir tarayıcı** | Editör tarayıcıda açılır (Chrome, Edge, Firefox...). | — |
 | *Claude Code (isteğe bağlı)* | Editörde seçtiğin şeyi tek tıkla bir Claude Code oturumuna gönderebilirsin. Kullanmıyorsan gerekmez. | https://claude.com/claude-code |
 
 ## Kurulum
