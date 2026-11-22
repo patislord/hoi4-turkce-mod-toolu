@@ -4,7 +4,7 @@ Hearts of Iron IV modları için Türkçe arayüzlü, tarayıcıda çalışan g�
 
 ## Gereken uygulamalar
 
-| Uygulama | Neden gerekli | İndirme |
+| Uygulama | Neden Lazım | İndirme |
 |---|---|---|
 | **Hearts of Iron IV** | Oyunun kendi dosyaları (ikonlar, metinler, vanilla içerik) buradan okunur. |  |
 | **Python 3** (3.15 ile test edildi) | Tool Python ile çalışır. Kurarken **"Add Python to PATH"** kutusunu işaretle. | https://www.python.org/downloads/ |
